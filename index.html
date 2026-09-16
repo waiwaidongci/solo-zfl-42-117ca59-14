@@ -856,6 +856,28 @@
     function checkImportIntegrity(st) {
       const chain = verifyAuditChain(st);
       if (!chain.ok) throw new Error("台账哈希链第 " + chain.badSeq + " 条记录起被篡改");
+      // 证书编号唯一、序号唯一且连续、与元数据一致
+      const seenCertIds = new Set(), seenSeqs = new Set();
+      for (const c of st.certs) {
+        if (!c || !c.certId || seenCertIds.has(c.certId))
+          throw new Error("证书编号缺失或重复" + (c && c.certId ? "：" + c.certId : ""));
+        seenCertIds.add(c.certId);
+        if (!Number.isInteger(c.seq) || c.seq < 1 || seenSeqs.has(c.seq))
+          throw new Error("证书序号缺失、重复或异常：" + c.certId);
+        seenSeqs.add(c.seq);
+      }
+      const maxSeq = st.certs.length ? Math.max(...seenSeqs) : 0;
+      if (maxSeq !== st.certs.length) throw new Error("证书序号不连续");
+      if (st.meta.certSeq !== maxSeq) throw new Error("证书序号与元数据 certSeq 不符");
+      // 作品引用存在、同一作品最多一张有效证书
+      const activeByWork = new Map();
+      for (const c of st.certs) {
+        if (!st.works.some(w => w.id === c.workId)) throw new Error("证书 " + c.certId + " 引用了不存在的作品");
+        if (c.status === "revoked") continue;
+        const dup = activeByWork.get(c.workId);
+        if (dup) throw new Error("同一作品存在多张有效证书：" + dup + " 与 " + c.certId);
+        activeByWork.set(c.workId, c.certId);
+      }
       for (const c of st.certs) {
         if (!c || !c.certId || !c.features) throw new Error("证书数据不完整");
         if (fingerprintOf(c.features, c.workId) !== c.fingerprint)
@@ -875,6 +897,23 @@
           throw new Error("证书 " + c.certId + " 的状态与台账回放不符");
         if (c.status !== "revoked" && c.holders.reduce((a, h) => a + (Number(h.share) || 0), 0) !== 100)
           throw new Error("证书 " + c.certId + " 的产权份额合计异常");
+      }
+      // 撤销、重签、补发的历史关系与台账核对
+      for (const c of st.certs) {
+        const reissueEvent = st.audit.find(e => e.action === "撤销重签" && e.detail && e.detail.certId === c.certId);
+        if (c.supersedes) {
+          if (!reissueEvent || reissueEvent.detail.oldCertId !== c.supersedes)
+            throw new Error("证书 " + c.certId + " 的重签关系与台账不符");
+          const old = st.certs.find(x => x.certId === c.supersedes);
+          if (!old) throw new Error("证书 " + c.certId + " 承接的原证书 " + c.supersedes + " 不存在");
+          if (old.status !== "revoked") throw new Error("证书 " + c.certId + " 承接的原证书未被撤销");
+          if (old.workId !== c.workId) throw new Error("证书 " + c.certId + " 与原证书的作品不一致");
+        } else if (reissueEvent) {
+          throw new Error("证书 " + c.certId + " 的重签标记与台账不符");
+        }
+        const genesis = st.audit.find(e => (e.action === "签发证书" || e.action === "补发证书") && e.detail && e.detail.certId === c.certId);
+        if (genesis && !!c.backfilled !== (genesis.action === "补发证书"))
+          throw new Error("证书 " + c.certId + " 的补发标记与台账不符");
       }
       const seenTransferIds = new Set();
       for (const t of st.transfers) {

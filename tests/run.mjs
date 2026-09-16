@@ -603,6 +603,105 @@ try {
   assert(await page8.evaluate(() => window.ZFL.verifyAll().badCerts.length === 0), "刷新后全部证书校验为真");
   await ctx7.close();
 
+  /* ---------- S15 重复证书与序号、历史关系 ---------- */
+  scenario = "S15-重复证书与序号";
+  const ctx8 = await browser.newContext();
+  await ctx8.addInitScript(() => {
+    localStorage.setItem("zfl42Works", JSON.stringify([
+      { id: "old-9", base: "脱胎观音", theme: "童子拜观音", line: "细线", progress: 100, dryDate: "2025-12-01", gold: "已上金粉", defect: "", delivery: "2026-01-15", status: "待交付", note: "", logs: ["2025-11-20 创建作品"] }
+    ]));
+  });
+  const page9 = await ctx8.newPage();
+  await page9.goto(base, { waitUntil: "load" });
+  await page9.evaluate(() => window.ZFL.setOperator("工坊主"));
+  const iss1 = await page9.evaluate(id => window.ZFL.txIssue(id, [{ name: "张三", share: 100 }]), "old-9");
+  assert(iss1.ok && iss1.result.backfilled === true, "准备：旧作品补发证书");
+  await page9.locator("#workForm input[name=base]").fill("木胎插屏");
+  await page9.locator("#workForm input[name=theme]").fill("松鹤延年");
+  await page9.locator("#workForm select[name=status]").selectOption("待交付");
+  await page9.locator("#workForm button[type=submit]").click();
+  await toastText(page9, /作品已加入工坊/);
+  const wid9 = await page9.evaluate(() => window.ZFL.state.works.find(w => w.theme === "松鹤延年").id);
+  const iss2 = await page9.evaluate(id => window.ZFL.txIssue(id, [{ name: "李四", share: 100 }]), wid9);
+  assert(iss2.ok, "准备：第二张证书签发");
+  await page9.evaluate(() => window.ZFL.setOperator("李四"));
+  assert((await page9.evaluate(c => window.ZFL.txRevoke(c, "信息错误"), iss2.result.certId)).ok, "准备：第二张证书撤销");
+  const iss3 = await page9.evaluate(c => window.ZFL.txReissue(c), iss2.result.certId);
+  assert(iss3.ok && iss3.result.supersedes === iss2.result.certId, "准备：重签第三张证书");
+  const [dl9] = await Promise.all([page9.waitForEvent("download"), page9.click("#exportBtn")]);
+  const valid9Path = await dl9.path();
+  const valid9 = JSON.parse(await readFile(valid9Path, "utf8"));
+  const clone9 = () => JSON.parse(JSON.stringify(valid9));
+  const stateStr9 = () => page9.evaluate(() => localStorage.getItem("zfl42State"));
+  async function badImport9(obj, re, label) {
+    const p = `/tmp/zfl-bad15-${label}.json`;
+    await writeFile(p, JSON.stringify(obj));
+    const before = await stateStr9();
+    await page9.setInputFiles("#importFile", p);
+    const t = await toastText(page9, re);
+    assert(re.test(t), `${label}被拒绝：${t}`);
+    assert(await stateStr9() === before, `${label}后作品、证书、转移单与台账保持原样`);
+  }
+  const dupId = clone9();
+  dupId.state.certs.push(JSON.parse(JSON.stringify(dupId.state.certs[0])));
+  await badImport9(dupId, /导入失败：证书编号缺失或重复/, "重复证书编号");
+  const dupSeq = clone9();
+  const seqCopy = JSON.parse(JSON.stringify(dupSeq.state.certs[0]));
+  seqCopy.certId = "ZFL-2026-0099";
+  dupSeq.state.certs.push(seqCopy);
+  await badImport9(dupSeq, /导入失败：证书序号/, "证书序号重复");
+  const gapSeq = clone9();
+  gapSeq.state.certs[2].seq = 8;
+  await badImport9(gapSeq, /导入失败：证书序号不连续/, "证书序号不连续");
+  const dual = clone9();
+  const forgedCert = JSON.parse(JSON.stringify(dual.state.certs[0]));
+  forgedCert.certId = "ZFL-2026-0099";
+  forgedCert.seq = 4;
+  forgedCert.workId = dual.state.certs[2].workId;
+  forgedCert.status = "active";
+  dual.state.certs.push(forgedCert);
+  dual.state.meta.certSeq = 4;
+  await badImport9(dual, /导入失败：同一作品存在多张有效证书/, "同作品双有效证书");
+  // 攻击者重算签章与证书链，但篡改重签/补发历史关系
+  const resealForgery = which => page9.evaluate(({ raw, kind }) => {
+    const obj = JSON.parse(raw);
+    if (kind === "reissue") {
+      const c = obj.state.certs.find(x => x.supersedes);
+      c.supersedes = null;
+    } else {
+      const c = obj.state.certs.find(x => x.backfilled);
+      c.backfilled = false;
+    }
+    for (let i = 0; i < obj.state.certs.length; i++) {
+      const x = obj.state.certs[i];
+      x.prevCertSeal = i === 0 ? "GENESIS" : obj.state.certs[i - 1].seal;
+      x.seal = window.ZFL.sha256Hex("ZFL42-CERT|" + window.ZFL.canonical({
+        certId: x.certId, workId: x.workId, seq: x.seq, features: x.features, fingerprint: x.fingerprint,
+        initialHolders: x.initialHolders, issuedAt: x.issuedAt, issuedBy: x.issuedBy,
+        backfilled: !!x.backfilled, supersedes: x.supersedes || null, prevCertSeal: x.prevCertSeal
+      }));
+    }
+    return obj;
+  }, { raw: JSON.stringify(valid9), kind: which });
+  await badImport9(await resealForgery("reissue"), /导入失败：证书 ZFL-\d{4}-\d{4} 的重签标记与台账不符/, "篡改重签关系");
+  await badImport9(await resealForgery("backfill"), /导入失败：证书 ZFL-\d{4}-\d{4} 的补发标记与台账不符/, "篡改补发标记");
+  // 正常恢复
+  await page9.setInputFiles("#importFile", valid9Path);
+  txt = await toastText(page9, /导入完成：作品 \d+ · 证书 \d+，台账链完整/);
+  assert(/导入完成/.test(txt), `正常恢复成功：${txt}`);
+  let st9 = await page9.evaluate(() => JSON.parse(JSON.stringify(window.ZFL.state)));
+  assert(st9.certs.length === 3 && st9.certs[0].backfilled === true && st9.certs[2].supersedes === st9.certs[1].certId, "恢复后补发与重签历史关系保持");
+  assert(await page9.evaluate(() => window.ZFL.verifyAll().badCerts.length === 0), "恢复后全部证书校验为真");
+  const [dl9b] = await Promise.all([page9.waitForEvent("download"), page9.click("#exportBtn")]);
+  await page9.setInputFiles("#importFile", await dl9b.path());
+  txt = await toastText(page9, /导入完成/);
+  assert(/台账链完整/.test(txt), "恢复后再导出仍可正常导入");
+  await page9.reload({ waitUntil: "load" });
+  st9 = await page9.evaluate(() => JSON.parse(JSON.stringify(window.ZFL.state)));
+  assert(st9.certs.length === 3 && st9.certs[2].supersedes === st9.certs[1].certId, "刷新后证书与历史关系一致");
+  assert(await page9.evaluate(() => window.ZFL.verifyAll().badCerts.length === 0), "刷新后全部证书校验为真");
+  await ctx8.close();
+
   assert(pageErrors.length === 0, `全程无页面脚本错误${pageErrors.length ? "：" + pageErrors[0] : ""}`);
   console.log(`\n全部场景通过，共 ${passed} 项断言。`);
 } catch (e) {
