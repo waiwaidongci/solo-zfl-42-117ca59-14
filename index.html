@@ -633,6 +633,8 @@
         const old = st.certs.find(c => c.certId === oldCertId);
         if (!old) throw new Error("证书不存在");
         if (old.status !== "revoked") throw new Error("仅已撤销的证书可以重签");
+        const operator = currentOperator();
+        if (!old.holders.some(h => h.name === operator)) throw new Error("越权操作：只有当前持有人可以重签证书");
         const work = st.works.find(w => w.id === old.workId);
         if (!work) throw new Error("作品不存在");
         if (st.certs.some(c => c.workId === old.workId && c.status !== "revoked")) throw new Error("该作品已有有效证书，不能重复签发");
@@ -765,9 +767,11 @@
         const cert = st.certs.find(c => c.certId === certId);
         if (!cert) throw new Error("证书不存在");
         if (cert.status === "revoked") throw new Error("证书已撤销，不能重复撤销");
+        if (cert.status === "frozen") throw new Error("证书质押冻结中，禁止撤销，请先解除冻结");
+        const operator = currentOperator();
+        if (!cert.holders.some(h => h.name === operator)) throw new Error("越权操作：只有当前持有人可以撤销证书");
         reason = String(reason || "").trim();
         if (!reason) throw new Error("撤销原因不能为空");
-        const operator = currentOperator();
         cert.status = "revoked";
         cert.revoked = { by: operator, reason, at: new Date().toISOString() };
         cert.freeze = null;
@@ -818,13 +822,50 @@
       });
     }
 
-    function txImport(imported) {
+    function checkImportFormat(s) {
+      if (!s || typeof s !== "object") throw new Error("备份格式不正确");
+      for (const k of ["works", "certs", "transfers", "audit"])
+        if (!Array.isArray(s[k])) throw new Error("备份格式不正确：缺少 " + k + " 数据");
+      if (!s.meta || typeof s.meta !== "object" || !Number.isFinite(s.meta.certSeq))
+        throw new Error("备份格式不正确：元数据缺失");
+    }
+
+    function checkImportIntegrity(st) {
+      const chain = verifyAuditChain(st);
+      if (!chain.ok) throw new Error("台账哈希链第 " + chain.badSeq + " 条记录起被篡改");
+      for (const c of st.certs) {
+        if (!c || !c.certId || !c.features) throw new Error("证书数据不完整");
+        if (fingerprintOf(c.features, c.workId) !== c.fingerprint)
+          throw new Error("证书 " + c.certId + " 特征指纹校验失败");
+        if (sealOf(c) !== c.seal)
+          throw new Error("证书 " + c.certId + " 签章校验失败");
+        const prev = st.certs.find(x => x.seq === c.seq - 1);
+        const expect = c.seq > 1 ? (prev ? prev.seal : null) : "GENESIS";
+        if (c.prevCertSeal !== expect) throw new Error("证书链在 " + c.certId + " 处断裂");
+      }
+      for (const c of st.certs) {
+        const rep = replayCert(st, c.certId);
+        if (!rep.holders) throw new Error("证书 " + c.certId + " 在台账中缺少签发记录");
+        if (!sameHolders(rep.holders, c.holders))
+          throw new Error("证书 " + c.certId + " 的产权人与台账回放不符");
+        if (rep.status !== c.status)
+          throw new Error("证书 " + c.certId + " 的状态与台账回放不符");
+        if (c.status !== "revoked" && c.holders.reduce((a, h) => a + (Number(h.share) || 0), 0) !== 100)
+          throw new Error("证书 " + c.certId + " 的产权份额合计异常");
+      }
+      for (const t of st.transfers)
+        if (!st.certs.some(c => c.certId === t.certId))
+          throw new Error("转移单引用了不存在的证书 " + t.certId);
+    }
+
+    function txImport(rawState) {
       return transact(() => {
-        const st = normalizeState(imported);
+        checkImportFormat(rawState);
+        const st = normalizeState(rawState);
+        checkImportIntegrity(st);
         addAudit(st, currentOperator(), "导入恢复",
           { works: st.works.length, certs: st.certs.length, transfers: st.transfers.length });
-        const report = verifyAll(st);
-        return { __replace: true, state: st, result: report };
+        return { __replace: true, state: st, result: verifyAll(st) };
       });
     }
 
@@ -1213,15 +1254,13 @@
       if (!file) return;
       let parsed;
       try { parsed = JSON.parse(await file.text()); }
-      catch (e) { toast("导入失败：不是有效的 JSON 文件", false); return; }
-      if (!parsed || parsed.app !== "zfl42" || !parsed.state) { toast("导入失败：文件格式不正确", false); return; }
-      const r = await runTx(txImport(parsed.state));
+      catch (e) { toast("导入失败：不是有效的 JSON 文件，当前数据未受影响", false); return; }
+      if (!parsed || parsed.app !== "zfl42" || !parsed.state) { toast("导入失败：文件格式不正确，当前数据未受影响", false); return; }
+      const r = await txImport(parsed.state);
       if (r.ok) {
-        const rep = r.result;
-        toast(rep.chainOk && !rep.badCerts.length
-          ? `导入完成：作品 ${state.works.length} · 证书 ${state.certs.length}，台账链完整`
-          : `导入完成但校验异常：${rep.chainOk ? "" : "台账链第 " + rep.badSeq + " 条起被篡改 "}${rep.badCerts.length ? "问题证书 " + rep.badCerts.join("、") : ""}`,
-          rep.chainOk && !rep.badCerts.length);
+        toast(`导入完成：作品 ${state.works.length} · 证书 ${state.certs.length}，台账链完整`, true);
+      } else {
+        toast(`导入失败：${r.error}，当前作品、证书、转移单与台账均未改动`, false);
       }
     });
 

@@ -1,5 +1,5 @@
 import http from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { chromium } from "playwright";
 
 process.env.LD_LIBRARY_PATH =
@@ -350,6 +350,111 @@ try {
   assert(await page4.evaluate(() => window.ZFL.verifyAll().badCerts.length === 0), "恢复后全部证书校验为真");
   assert(JSON.stringify(st4.certs.map(c => [c.certId, c.seal])) === JSON.stringify(st.certs.map(c => [c.certId, c.seal])), "恢复后证书签章与导出前完全一致");
   await ctx3.close();
+
+  /* ---------- S11 销毁授权边界：撤销/重签仅当前持有人可执行 ---------- */
+  scenario = "S11-销毁授权边界";
+  const ctx4 = await browser.newContext();
+  const page5 = await ctx4.newPage();
+  await page5.goto(base, { waitUntil: "load" });
+  const snap5 = () => page5.evaluate(() => localStorage.getItem("zfl42State"));
+  await page5.evaluate(() => window.ZFL.setOperator("工坊主"));
+  const wid5 = await page5.evaluate(() => window.ZFL.state.works.find(w => w.status === "待交付").id);
+  const iss5 = await page5.evaluate(id => window.ZFL.txIssue(id, [{ name: "张三", share: 60 }, { name: "李四", share: 40 }]), wid5);
+  assert(iss5.ok, "准备：证书签发成功（张三60/李四40）");
+  const cid5 = iss5.result.certId;
+  // 攻击者（非持有人）通过界面尝试撤销
+  await page5.evaluate(() => window.ZFL.setOperator("路人甲"));
+  let before5 = await snap5();
+  await page5.locator(`#certList .cert[data-cert="${cid5}"] >> button:has-text("撤销证书")`).click();
+  await page5.waitForSelector("#revokeDialog[open]");
+  await page5.fill("#rReason", "恶意销毁");
+  await page5.click("#submitRevoke");
+  txt = await toastText(page5, /越权操作/);
+  assert(/越权操作：只有当前持有人可以撤销证书/.test(txt), `攻击者撤销被拒绝：${txt}`);
+  await page5.click("#cancelRevoke");
+  assert(await snap5() === before5, "拒绝后证书状态与台账不变（攻击者撤销）");
+  assert(await page5.locator(`#certList .cert[data-cert="${cid5}"] .badge:not(.revoked)`).isVisible(), "证书仍为有效状态");
+  // 张三转走全部份额，成为已无份额的原持有人
+  await page5.evaluate(() => window.ZFL.setOperator("张三"));
+  const it5 = await page5.evaluate(c => window.ZFL.txInitiate(c, "张三", "王五", 60, "普通转让", ""), cid5);
+  assert(it5.ok, "准备：张三转出全部 60% 份额");
+  await page5.evaluate(() => window.ZFL.setOperator("王五"));
+  assert((await page5.evaluate(t => window.ZFL.txConfirm(t), it5.result.id)).ok, "准备：王五确认受让");
+  await page5.evaluate(() => window.ZFL.setOperator("张三"));
+  before5 = await snap5();
+  let r5 = await page5.evaluate(c => window.ZFL.txRevoke(c, "报复性销毁"), cid5);
+  assert(!r5.ok && /越权操作/.test(r5.error), `已无份额的原持有人撤销被拒绝：${r5.error}`);
+  assert(await snap5() === before5, "拒绝后证书状态与台账不变（无份额主体）");
+  // 冻结中禁止撤销与重签
+  await page5.evaluate(() => window.ZFL.setOperator("李四"));
+  assert((await page5.evaluate(c => window.ZFL.txFreeze(c, "平安银行", "贷款质押"), cid5)).ok, "准备：持有人质押冻结成功");
+  before5 = await snap5();
+  r5 = await page5.evaluate(c => window.ZFL.txRevoke(c, "冻结中销毁"), cid5);
+  assert(!r5.ok && /冻结/.test(r5.error), `冻结中撤销被拒绝：${r5.error}`);
+  let r6 = await page5.evaluate(c => window.ZFL.txReissue(c), cid5);
+  assert(!r6.ok && /仅已撤销/.test(r6.error), `冻结中重签被拒绝：${r6.error}`);
+  assert(await snap5() === before5, "拒绝后证书状态与台账不变（冻结中）");
+  // 解冻 → 持有人撤销成功 → 非持有人重签被拒 → 持有人重签成功
+  assert((await page5.evaluate(c => window.ZFL.txUnfreeze(c), cid5)).ok, "解冻成功");
+  r5 = await page5.evaluate(c => window.ZFL.txRevoke(c, "登记信息错误"), cid5);
+  assert(r5.ok, "当前持有人撤销成功");
+  await page5.evaluate(() => window.ZFL.setOperator("路人甲"));
+  before5 = await snap5();
+  r5 = await page5.evaluate(c => window.ZFL.txReissue(c), cid5);
+  assert(!r5.ok && /越权操作/.test(r5.error), `非持有人重签被拒绝：${r5.error}`);
+  assert(await snap5() === before5, "拒绝后证书状态与台账不变（非持有人重签）");
+  await page5.evaluate(() => window.ZFL.setOperator("王五"));
+  r5 = await page5.evaluate(c => window.ZFL.txReissue(c), cid5);
+  assert(r5.ok, "当前持有人重签成功");
+  const st5 = await page5.evaluate(() => JSON.parse(JSON.stringify(window.ZFL.state)));
+  assert(st5.audit.filter(a => a.action === "撤销证书").length === 1, "台账中仅有一次成功撤销记录（被拒绝的尝试未留痕）");
+  assert(st5.audit.filter(a => a.action === "撤销重签").length === 1, "台账中仅有一次成功重签记录");
+  assert(await page5.evaluate(() => window.ZFL.verifyAll().badCerts.length === 0), "全部证书校验为真");
+  await ctx4.close();
+
+  /* ---------- S12 导入校验：先校验后恢复，异常导入零影响 ---------- */
+  scenario = "S12-导入校验";
+  const ctx5 = await browser.newContext();
+  const page6 = await ctx5.newPage();
+  await page6.goto(base, { waitUntil: "load" });
+  await page6.evaluate(() => window.ZFL.setOperator("工坊主"));
+  const wid6 = await page6.evaluate(() => window.ZFL.state.works.find(w => w.status === "待交付").id);
+  const iss6 = await page6.evaluate(id => window.ZFL.txIssue(id, [{ name: "张三", share: 100 }]), wid6);
+  assert(iss6.ok, "准备：签发成功");
+  const [dl6] = await Promise.all([page6.waitForEvent("download"), page6.click("#exportBtn")]);
+  const validPath = await dl6.path();
+  const validJson = JSON.parse(await readFile(validPath, "utf8"));
+  const clone = () => JSON.parse(JSON.stringify(validJson));
+  const stateStr = () => page6.evaluate(() => localStorage.getItem("zfl42State"));
+  async function badImport(obj, re, label) {
+    const p = `/tmp/zfl-bad-${label}.json`;
+    await writeFile(p, JSON.stringify(obj));
+    const before = await stateStr();
+    await page6.setInputFiles("#importFile", p);
+    const t = await toastText(page6, re);
+    assert(re.test(t), `${label}被拒绝：${t}`);
+    assert(await stateStr() === before, `${label}后作品、证书、转移单与台账保持原样`);
+  }
+  await badImport({ app: "zfl42", state: { works: [], certs: "x", transfers: [], audit: [], meta: { certSeq: 0 } } }, /导入失败：备份格式不正确/, "格式错误");
+  await badImport({ app: "fake", state: validJson.state }, /导入失败：文件格式不正确/, "非法文件标识");
+  const tamperAudit = clone();
+  tamperAudit.state.audit[0].actor = "黑客";
+  await badImport(tamperAudit, /导入失败：台账哈希链第 \d+ 条记录起被篡改/, "台账链篡改");
+  const tamperCert = clone();
+  tamperCert.state.certs[0].features.theme = "赝品";
+  await badImport(tamperCert, /导入失败：证书 ZFL-\d{4}-\d{4} 特征指纹校验失败/, "证书特征篡改");
+  const tamperOwner = clone();
+  tamperOwner.state.certs[0].holders = [{ name: "篡改者", share: 100 }];
+  await badImport(tamperOwner, /导入失败：证书 ZFL-\d{4}-\d{4} 的产权人与台账回放不符/, "产权关系篡改");
+  // 正常导入
+  await page6.setInputFiles("#importFile", validPath);
+  txt = await toastText(page6, /导入完成：作品 \d+ · 证书 \d+，台账链完整/);
+  assert(/导入完成/.test(txt), `正常备份导入成功：${txt}`);
+  const st6 = await page6.evaluate(() => JSON.parse(JSON.stringify(window.ZFL.state)));
+  assert(st6.certs.length === validJson.state.certs.length && st6.works.length === validJson.state.works.length, "恢复后作品与证书数量一致");
+  assert(st6.audit.length === validJson.state.audit.length + 1 && st6.audit[st6.audit.length - 1].action === "导入恢复", "恢复事件追加台账且历史不变");
+  assert(await page6.evaluate(() => window.ZFL.verifyAll().badCerts.length === 0), "恢复后全部证书校验为真");
+  await ctx5.close();
 
   assert(pageErrors.length === 0, `全程无页面脚本错误${pageErrors.length ? "：" + pageErrors[0] : ""}`);
   console.log(`\n全部场景通过，共 ${passed} 项断言。`);
