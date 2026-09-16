@@ -42,6 +42,7 @@
     .mini h3 { margin: 0 0 8px; font-size: 14px; }
     .item { border: 1px solid #d7e0dc; border-left: 4px solid var(--teal); background: #fff; border-radius: 7px; padding: 9px; margin-bottom: 8px; cursor: pointer; }
     .item.overdue { border-left-color: var(--red); }
+    .item.static { cursor: default; }
     .board { display: grid; grid-template-columns: repeat(4, minmax(185px, 1fr)); gap: 12px; overflow-x: auto; }
     .col { background: #f9fbf9; border: 1px solid var(--line); border-radius: 8px; padding: 10px; min-height: 320px; }
     .col h3 { display: flex; justify-content: space-between; margin: 0 0 10px; font-size: 15px; }
@@ -51,6 +52,30 @@
     dialog::backdrop { background: rgba(0, 0, 0, 0.3); }
     .dialog-body { padding: 16px; display: grid; gap: 10px; }
     .empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+    .certbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 12px; }
+    .certbar label { min-width: 170px; flex: 0 0 auto; }
+    .certbar button { flex: 0 0 auto; }
+    .certlist { display: grid; gap: 10px; }
+    .cert { border: 1px solid var(--line); border-left: 4px solid var(--teal); border-radius: 8px; padding: 10px; background: #fff; }
+    .cert.frozen { border-left-color: var(--amber); }
+    .cert.revoked { border-left-color: var(--red); background: #fbf7f7; }
+    .cert-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+    .badge { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: var(--teal); color: #fff; }
+    .badge.frozen { background: var(--amber); }
+    .badge.revoked { background: var(--red); }
+    .badge.back { background: var(--violet); }
+    .badge.plain { background: #5d6764; }
+    .holder-row { display: grid; grid-template-columns: 1fr 96px auto; gap: 8px; margin-bottom: 8px; }
+    #toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); padding: 10px 18px; border-radius: 8px; color: #fff; background: #333; opacity: 0; pointer-events: none; transition: opacity .2s; max-width: 82vw; z-index: 20; font-size: 14px; }
+    #toast.show { opacity: 1; }
+    #toast.ok { background: var(--teal); }
+    #toast.err { background: var(--red); }
+    .verdict { font-size: 16px; font-weight: 600; padding: 8px 10px; border-radius: 6px; }
+    .verdict.good { background: #e3f1ec; color: var(--teal); }
+    .verdict.bad { background: #f7e6e6; color: var(--red); }
+    .problems { color: var(--red); font-size: 13px; margin: 8px 0 0; padding-left: 18px; }
+    .logrow { font-size: 12px; color: var(--muted); border-bottom: 1px dashed var(--line); padding: 4px 0; word-break: break-all; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
     @media (max-width: 980px) {
       header { display: block; padding: 18px; }
       main { padding: 16px; }
@@ -63,9 +88,13 @@
   <header>
     <div>
       <h1>小型漆线雕工坊管理</h1>
-      <div class="sub">贴线、阴干、上金粉、待交付的作品流转与缺陷追踪</div>
+      <div class="sub">贴线、阴干、上金粉、待交付的作品流转与缺陷追踪 · 已交付作品防伪证书与产权转移</div>
     </div>
-    <button id="exportBtn" class="secondary">导出 JSON</button>
+    <div class="actions" style="margin-top:0">
+      <button id="exportBtn" class="secondary">导出 JSON</button>
+      <button id="importBtn" class="secondary">导入恢复</button>
+      <input type="file" id="importFile" accept="application/json,.json" hidden>
+    </div>
   </header>
 
   <main>
@@ -118,6 +147,31 @@
         <div id="board" class="board"></div>
       </section>
     </section>
+
+    <section class="panel" id="certSection">
+      <h2>防伪证书与产权转移台</h2>
+      <div class="certbar">
+        <label>当前操作人<input id="operatorInput" placeholder="操作人姓名"></label>
+        <label>按编号校验证书<input id="verifyInput" placeholder="ZFL-2026-0001"></label>
+        <button id="verifyBtn" type="button">校验真伪</button>
+        <button id="verifyChainBtn" type="button" class="secondary">校验台账链</button>
+      </div>
+      <div class="lists">
+        <div class="mini">
+          <h3>可签发证书的作品</h3>
+          <div id="issuableList"></div>
+        </div>
+        <div class="mini">
+          <h3>待确认转移</h3>
+          <div id="pendingList"></div>
+        </div>
+        <div class="mini">
+          <h3>产权台账（最近记录）</h3>
+          <div id="auditList"></div>
+        </div>
+      </div>
+      <div id="certList" class="certlist"></div>
+    </section>
   </main>
 
   <dialog id="detailDialog">
@@ -134,82 +188,703 @@
     </div>
   </dialog>
 
-  <script>
-    const statuses = ["贴线中", "待阴干", "上金粉", "待交付"];
-    const storageKey = "zfl42Works";
-    const today = new Date().toISOString().slice(0, 10);
-    const seed = [
-      { id: crypto.randomUUID(), base: "木胎香盒", theme: "海水江崖", line: "细线", progress: 70, dryDate: today, gold: "未处理", defect: "", delivery: "2026-06-26", status: "待阴干", note: "边线需保持低浮雕感", logs: ["创建作品"] },
-      { id: crypto.randomUUID(), base: "脱胎盘", theme: "折枝梅", line: "混合线", progress: 95, dryDate: "2026-06-20", gold: "试扫粉", defect: "左侧枝干翘线", delivery: "2026-06-23", status: "上金粉", note: "客户要求金粉偏暗", logs: ["创建作品", "记录翘线"] },
-      { id: crypto.randomUUID(), base: "竹胎笔筒", theme: "云雷纹", line: "中线", progress: 40, dryDate: "2026-06-24", gold: "未处理", defect: "", delivery: "2026-06-30", status: "贴线中", note: "", logs: ["创建作品"] }
-    ];
-    let works = JSON.parse(localStorage.getItem(storageKey) || "null") || seed;
-    let activeId = null;
+  <dialog id="issueDialog">
+    <div class="dialog-body">
+      <h2 id="issueTitle">签发防伪证书</h2>
+      <div id="issueWorkInfo" class="meta"></div>
+      <div class="meta">证书将绑定作品特征指纹、唯一编号、持有人与签发时间，签发后不可覆盖。</div>
+      <div id="holderRows"></div>
+      <button id="addHolderRow" type="button" class="secondary">添加持有人</button>
+      <div class="meta" id="shareSum"></div>
+      <div class="actions">
+        <button id="confirmIssue">确认签发（不可撤销）</button>
+        <button id="cancelIssue" class="secondary">取消</button>
+      </div>
+    </div>
+  </dialog>
 
+  <dialog id="transferDialog">
+    <div class="dialog-body">
+      <h2>发起产权转移</h2>
+      <div id="transferCertInfo" class="meta"></div>
+      <label>转让人（须为当前操作人）
+        <select id="tFrom"></select>
+      </label>
+      <label>受让方姓名<input id="tTo" placeholder="买方 / 继承人"></label>
+      <div class="grid2">
+        <label>转移份额（%）<input id="tShare" type="number" min="1" max="100" value=""></label>
+        <label>转移类型<select id="tType"><option>普通转让</option><option>继承过户</option></select></label>
+      </div>
+      <label>事由 / 凭证号<input id="tNote" placeholder="买卖合同号 / 继承公证书号"></label>
+      <div class="actions">
+        <button id="submitTransfer">提交转移单</button>
+        <button id="cancelTransfer" class="secondary">取消</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="freezeDialog">
+    <div class="dialog-body">
+      <h2>质押冻结</h2>
+      <div id="freezeCertInfo" class="meta"></div>
+      <label>质权人<input id="fPledgee" placeholder="银行 / 典当行"></label>
+      <label>质押事由<input id="fReason" placeholder="经营贷款质押"></label>
+      <div class="meta">冻结期间该证书的一切转移与确认都会被拒绝，解冻后恢复。</div>
+      <div class="actions">
+        <button id="submitFreeze" class="warn">确认冻结</button>
+        <button id="cancelFreeze" class="secondary">取消</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="revokeDialog">
+    <div class="dialog-body">
+      <h2>撤销证书</h2>
+      <div id="revokeCertInfo" class="meta"></div>
+      <label>撤销原因<input id="rReason" placeholder="登记信息错误 / 作品损毁"></label>
+      <div class="meta">撤销后证书保留在历史记录中可供校验，待确认转移单一并作废；如需继续使用请重签新证。</div>
+      <div class="actions">
+        <button id="submitRevoke" class="danger">确认撤销</button>
+        <button id="cancelRevoke" class="secondary">取消</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="verifyDialog">
+    <div class="dialog-body">
+      <h2>证书校验结果</h2>
+      <div id="verifyResult"></div>
+      <div class="actions">
+        <button id="closeVerify" class="secondary">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="recordsDialog">
+    <div class="dialog-body">
+      <h2 id="recordsTitle">流转记录</h2>
+      <div id="recordsList"></div>
+      <div class="actions">
+        <button id="closeRecords" class="secondary">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="toast"></div>
+
+  <script>
+    "use strict";
+    /* ============ 基础：SHA-256（同步实现，支持 UTF-8） ============ */
+    function sha256Hex(message) {
+      const K = [
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+      ];
+      const bytes = new TextEncoder().encode(String(message));
+      const bitLen = bytes.length * 8;
+      const total = bytes.length + 1 + ((55 - (bytes.length % 64) + 64) % 64) + 8;
+      const buf = new Uint8Array(total);
+      buf.set(bytes);
+      buf[bytes.length] = 0x80;
+      const dv = new DataView(buf.buffer);
+      dv.setUint32(total - 8, Math.floor(bitLen / 4294967296));
+      dv.setUint32(total - 4, bitLen >>> 0);
+      let h0=0x6a09e667,h1=0xbb67ae85,h2=0x3c6ef372,h3=0xa54ff53a,h4=0x510e527f,h5=0x9b05688c,h6=0x1f83d9ab,h7=0x5be0cd19;
+      const w = new Uint32Array(64);
+      for (let off = 0; off < total; off += 64) {
+        for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4);
+        for (let i = 16; i < 64; i++) {
+          const x = w[i-15], y = w[i-2];
+          const s0 = ((x>>>7)|(x<<25)) ^ ((x>>>18)|(x<<14)) ^ (x>>>3);
+          const s1 = ((y>>>17)|(y<<15)) ^ ((y>>>19)|(y<<13)) ^ (y>>>10);
+          w[i] = (w[i-16] + s0 + w[i-7] + s1) >>> 0;
+        }
+        let a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,h=h7;
+        for (let i = 0; i < 64; i++) {
+          const S1 = ((e>>>6)|(e<<26)) ^ ((e>>>11)|(e<<21)) ^ ((e>>>25)|(e<<7));
+          const ch = (e & f) ^ (~e & g);
+          const t1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+          const S0 = ((a>>>2)|(a<<30)) ^ ((a>>>13)|(a<<19)) ^ ((a>>>22)|(a<<10));
+          const maj = (a & b) ^ (a & c) ^ (b & c);
+          const t2 = (S0 + maj) >>> 0;
+          h=g; g=f; f=e; e=(d+t1)>>>0; d=c; c=b; b=a; a=(t1+t2)>>>0;
+        }
+        h0=(h0+a)>>>0; h1=(h1+b)>>>0; h2=(h2+c)>>>0; h3=(h3+d)>>>0;
+        h4=(h4+e)>>>0; h5=(h5+f)>>>0; h6=(h6+g)>>>0; h7=(h7+h)>>>0;
+      }
+      return [h0,h1,h2,h3,h4,h5,h6,h7].map(x => x.toString(16).padStart(8, "0")).join("");
+    }
+
+    function canonical(v) {
+      if (v === null || typeof v !== "object") return JSON.stringify(v);
+      if (Array.isArray(v)) return "[" + v.map(canonical).join(",") + "]";
+      return "{" + Object.keys(v).sort().map(k => JSON.stringify(k) + ":" + canonical(v[k])).join(",") + "}";
+    }
+
+    const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    const fmtTime = iso => { const d = new Date(iso); return isNaN(d) ? String(iso) : d.toLocaleString("zh-CN"); };
+
+    /* ============ 状态：统一存储、迁移、持久化 ============ */
+    const STORE_KEY = "zfl42State";
+    const LEGACY_KEY = "zfl42Works";
+    const LOCK_KEY = "zfl42Lock";
+    const OPERATOR_KEY = "zfl42Operator";
+    const statuses = ["贴线中", "待阴干", "上金粉", "待交付"];
+    const CERT_STATUS = { active: "有效", frozen: "质押冻结", revoked: "已撤销" };
+    const today = new Date().toISOString().slice(0, 10);
+
+    function emptyState() {
+      return { works: [], certs: [], transfers: [], audit: [], meta: { version: 0, certSeq: 0 } };
+    }
+
+    function seedState() {
+      const st = emptyState();
+      st.works = [
+        { id: crypto.randomUUID(), base: "木胎香盒", theme: "海水江崖", line: "细线", progress: 70, dryDate: today, gold: "未处理", defect: "", delivery: "2026-06-26", status: "待阴干", note: "边线需保持低浮雕感", logs: ["创建作品"] },
+        { id: crypto.randomUUID(), base: "脱胎盘", theme: "折枝梅", line: "混合线", progress: 95, dryDate: "2026-06-20", gold: "试扫粉", defect: "左侧枝干翘线", delivery: "2026-06-23", status: "上金粉", note: "客户要求金粉偏暗", logs: ["创建作品", "记录翘线"] },
+        { id: crypto.randomUUID(), base: "竹胎笔筒", theme: "云雷纹", line: "中线", progress: 40, dryDate: "2026-06-24", gold: "未处理", defect: "", delivery: "2026-06-30", status: "贴线中", note: "", logs: ["创建作品"] },
+        { id: crypto.randomUUID(), base: "脱胎花瓶", theme: "麒麟献瑞", line: "粗线", progress: 100, dryDate: "2026-09-01", gold: "已上金粉", defect: "", delivery: "2026-09-10", status: "待交付", note: "客户要求配防伪证书交付", logs: ["创建作品"] }
+      ];
+      return st;
+    }
+
+    function normalizeState(s) {
+      const st = emptyState();
+      if (s && typeof s === "object") {
+        if (Array.isArray(s.works)) st.works = s.works;
+        if (Array.isArray(s.certs)) st.certs = s.certs;
+        if (Array.isArray(s.transfers)) st.transfers = s.transfers;
+        if (Array.isArray(s.audit)) st.audit = s.audit;
+        if (s.meta && typeof s.meta === "object") st.meta = { version: Number(s.meta.version) || 0, certSeq: Number(s.meta.certSeq) || 0 };
+      }
+      return st;
+    }
+
+    function persist(st) {
+      localStorage.setItem(STORE_KEY, JSON.stringify(st));
+    }
+
+    function loadState() {
+      const raw = localStorage.getItem(STORE_KEY);
+      if (raw) {
+        try { return normalizeState(JSON.parse(raw)); } catch (e) { console.error("状态解析失败", e); }
+      }
+      const legacy = localStorage.getItem(LEGACY_KEY);
+      if (legacy) {
+        let works = [];
+        try { works = JSON.parse(legacy) || []; } catch (e) { works = []; }
+        const st = emptyState();
+        st.works = works.map(w => ({ ...w, legacy: true }));
+        persist(st);
+        localStorage.removeItem(LEGACY_KEY);
+        return st;
+      }
+      return null;
+    }
+
+    let state = loadState();
+    if (!state) { state = seedState(); persist(state); }
+
+    function currentOperator() {
+      return (sessionStorage.getItem(OPERATOR_KEY) || "工坊主").trim() || "工坊主";
+    }
+
+    /* ============ 证书指纹、签章、台账链 ============ */
+    function pickFeatures(work) {
+      return {
+        base: work.base, theme: work.theme, line: work.line, gold: work.gold,
+        progress: Number(work.progress), dryDate: work.dryDate, delivery: work.delivery,
+        defect: work.defect || ""
+      };
+    }
+
+    function fingerprintOf(features, workId) {
+      return sha256Hex("ZFL42-WORK|" + workId + "|" + canonical(features));
+    }
+
+    function sealOf(cert) {
+      return sha256Hex("ZFL42-CERT|" + canonical({
+        certId: cert.certId, workId: cert.workId, seq: cert.seq,
+        features: cert.features, fingerprint: cert.fingerprint,
+        initialHolders: cert.initialHolders, issuedAt: cert.issuedAt, issuedBy: cert.issuedBy,
+        backfilled: !!cert.backfilled, supersedes: cert.supersedes || null,
+        prevCertSeal: cert.prevCertSeal
+      }));
+    }
+
+    function addAudit(st, actor, action, detail) {
+      const prevHash = st.audit.length ? st.audit[st.audit.length - 1].hash : "GENESIS";
+      const entry = {
+        seq: st.audit.length + 1,
+        time: new Date().toISOString(),
+        actor, action, detail,
+        prevHash
+      };
+      entry.hash = sha256Hex("ZFL42-AUDIT|" + prevHash + "|" + canonical({
+        seq: entry.seq, time: entry.time, actor: entry.actor, action: entry.action, detail: entry.detail
+      }));
+      st.audit.push(entry);
+      return entry;
+    }
+
+    function verifyAuditChain(st) {
+      let prev = "GENESIS";
+      for (const e of st.audit) {
+        if (e.prevHash !== prev) return { ok: false, badSeq: e.seq };
+        const hash = sha256Hex("ZFL42-AUDIT|" + prev + "|" + canonical({
+          seq: e.seq, time: e.time, actor: e.actor, action: e.action, detail: e.detail
+        }));
+        if (hash !== e.hash) return { ok: false, badSeq: e.seq };
+        prev = e.hash;
+      }
+      return { ok: true };
+    }
+
+    /* 从台账回放某证书的全部历史，推导当前持有人与状态（历史不能重算，只能逐条重放） */
+    function replayCert(st, certId) {
+      let holders = null, status = null;
+      for (const e of st.audit) {
+        const d = e.detail || {};
+        if (d.certId !== certId) continue;
+        if ((e.action === "签发证书" || e.action === "补发证书" || e.action === "撤销重签") && Array.isArray(d.holders)) {
+          holders = d.holders.map(h => ({ name: h.name, share: h.share }));
+          status = "active";
+        } else if (!holders) {
+          continue;
+        } else if (e.action === "转移确认" || e.action === "继承过户完成") {
+          const from = holders.find(h => h.name === d.from);
+          if (from) {
+            from.share -= d.share;
+            if (from.share <= 0) holders.splice(holders.indexOf(from), 1);
+          }
+          const to = holders.find(h => h.name === d.to);
+          if (to) to.share += d.share; else holders.push({ name: d.to, share: d.share });
+        } else if (e.action === "质押冻结") {
+          status = "frozen";
+        } else if (e.action === "解除冻结") {
+          status = "active";
+        } else if (e.action === "撤销证书") {
+          status = "revoked";
+        }
+      }
+      return { holders, status };
+    }
+
+    function sameHolders(a, b) {
+      if (!a || !b || a.length !== b.length) return false;
+      const key = h => h.map(x => x.name + "=" + x.share).sort().join("|");
+      return key(a) === key(b);
+    }
+
+    function verifyCert(st, certId) {
+      const cert = st.certs.find(c => c.certId === certId);
+      if (!cert) return { found: false, authentic: false, problems: ["证书编号不存在"] };
+      const problems = [];
+      if (fingerprintOf(cert.features, cert.workId) !== cert.fingerprint)
+        problems.push("作品特征指纹不符：特征数据被篡改");
+      if (sealOf(cert) !== cert.seal)
+        problems.push("证书签章不符：签发内容被篡改");
+      const prev = st.certs.find(c => c.seq === cert.seq - 1);
+      const expectPrev = cert.seq > 1 ? (prev ? prev.seal : null) : "GENESIS";
+      if (cert.prevCertSeal !== expectPrev)
+        problems.push("证书链断裂：前序证书签章不符");
+      const rep = replayCert(st, certId);
+      if (!rep.holders) {
+        problems.push("产权台账中缺少该证书的签发记录");
+      } else {
+        if (!sameHolders(rep.holders, cert.holders))
+          problems.push("当前持有人与产权台账回放结果不符");
+        if (rep.status !== cert.status)
+          problems.push("证书状态与产权台账回放结果不符");
+      }
+      const chain = verifyAuditChain(st);
+      if (!chain.ok) problems.push("产权台账链第 " + chain.badSeq + " 条记录起被篡改");
+      return { found: true, authentic: problems.length === 0, problems, cert, replay: rep };
+    }
+
+    function verifyAll(st) {
+      const chain = verifyAuditChain(st);
+      const badCerts = st.certs.filter(c => !verifyCert(st, c.certId).authentic).map(c => c.certId);
+      return { chainOk: chain.ok, badSeq: chain.badSeq || null, badCerts };
+    }
+
+    /* ============ 事务：跨页互斥 + 全部成功或全部不写 ============ */
+    let busy = false;
+    let spinToken = null;
+
+    function acquireSpin() {
+      const now = Date.now();
+      try {
+        const raw = localStorage.getItem(LOCK_KEY);
+        if (raw) {
+          const l = JSON.parse(raw);
+          if (l.expires > now) return false;
+        }
+        const token = crypto.randomUUID();
+        localStorage.setItem(LOCK_KEY, JSON.stringify({ token, expires: now + 5000 }));
+        const check = JSON.parse(localStorage.getItem(LOCK_KEY) || "{}");
+        if (check.token !== token) return false;
+        spinToken = token;
+        return true;
+      } catch (e) { return false; }
+    }
+
+    function releaseSpin() {
+      try {
+        const raw = localStorage.getItem(LOCK_KEY);
+        if (raw && JSON.parse(raw).token === spinToken) localStorage.removeItem(LOCK_KEY);
+      } catch (e) {}
+      spinToken = null;
+    }
+
+    async function transact(fn) {
+      if (busy) return { ok: false, error: "操作进行中，请稍候" };
+      busy = true;
+      const critical = () => {
+        const fresh = loadState() || emptyState();
+        const out = fn(fresh);
+        const isReplace = out && out.__replace === true;
+        const next = isReplace ? normalizeState(out.state) : fresh;
+        next.meta.version += 1;
+        persist(next);
+        state = next;
+        render();
+        return isReplace ? out.result : out;
+      };
+      try {
+        if (navigator.locks && navigator.locks.request) {
+          let result;
+          await navigator.locks.request(LOCK_KEY, { ifAvailable: true }, async (lock) => {
+            if (!lock) throw new Error("另一页面正在操作，本次提交被拒绝");
+            result = critical();
+          });
+          return { ok: true, result };
+        }
+        if (!acquireSpin()) return { ok: false, error: "另一页面正在操作，本次提交被拒绝" };
+        try { return { ok: true, result: critical() }; }
+        finally { releaseSpin(); }
+      } catch (e) {
+        return { ok: false, error: (e && e.message) || String(e) };
+      } finally {
+        busy = false;
+      }
+    }
+
+    /* ============ 业务动作（全部在事务内校验与落库） ============ */
+    function validateHolders(holders) {
+      if (!Array.isArray(holders) || !holders.length) throw new Error("至少需要一名持有人");
+      const clean = holders.map(h => ({ name: String(h.name || "").trim(), share: Number(h.share) }));
+      if (clean.some(h => !h.name)) throw new Error("持有人姓名不能为空");
+      if (new Set(clean.map(h => h.name)).size !== clean.length) throw new Error("持有人姓名不能重复");
+      if (clean.some(h => !Number.isInteger(h.share) || h.share < 1 || h.share > 100)) throw new Error("份额须为 1-100 的整数");
+      if (clean.reduce((a, h) => a + h.share, 0) !== 100) throw new Error("份额合计必须等于 100%");
+      return clean;
+    }
+
+    function buildCert(st, work, holders, supersedes) {
+      st.meta.certSeq += 1;
+      const seq = st.meta.certSeq;
+      const certId = "ZFL-" + new Date().getFullYear() + "-" + String(seq).padStart(4, "0");
+      const features = pickFeatures(work);
+      const prev = st.certs.length ? st.certs[st.certs.length - 1] : null;
+      const cert = {
+        certId, workId: work.id, seq,
+        features,
+        fingerprint: fingerprintOf(features, work.id),
+        initialHolders: holders.map(h => ({ ...h })),
+        holders: holders.map(h => ({ ...h })),
+        issuedAt: new Date().toISOString(),
+        issuedBy: currentOperator(),
+        backfilled: !!work.legacy,
+        supersedes: supersedes || null,
+        status: "active",
+        freeze: null,
+        revoked: null,
+        prevCertSeal: prev ? prev.seal : "GENESIS"
+      };
+      cert.seal = sealOf(cert);
+      return cert;
+    }
+
+    function txIssue(workId, holders) {
+      return transact(st => {
+        const work = st.works.find(w => w.id === workId);
+        if (!work) throw new Error("作品不存在");
+        if (work.status !== "待交付") throw new Error("仅已交付（待交付）的作品可签发证书");
+        if (st.certs.some(c => c.workId === workId && c.status !== "revoked")) throw new Error("该作品已有有效证书，签发后不能覆盖");
+        const clean = validateHolders(holders);
+        const cert = buildCert(st, work, clean, null);
+        st.certs.push(cert);
+        addAudit(st, cert.issuedBy, cert.backfilled ? "补发证书" : "签发证书",
+          { certId: cert.certId, workId: work.id, theme: work.theme, holders: clean });
+        work.logs.push(new Date().toLocaleString("zh-CN") + " " + (cert.backfilled ? "补发" : "签发") + "防伪证书 " + cert.certId);
+        return cert;
+      });
+    }
+
+    function txReissue(oldCertId) {
+      return transact(st => {
+        const old = st.certs.find(c => c.certId === oldCertId);
+        if (!old) throw new Error("证书不存在");
+        if (old.status !== "revoked") throw new Error("仅已撤销的证书可以重签");
+        const work = st.works.find(w => w.id === old.workId);
+        if (!work) throw new Error("作品不存在");
+        if (st.certs.some(c => c.workId === old.workId && c.status !== "revoked")) throw new Error("该作品已有有效证书，不能重复签发");
+        const cert = buildCert(st, work, old.holders, old.certId);
+        cert.backfilled = old.backfilled;
+        cert.seal = sealOf(cert);
+        st.certs.push(cert);
+        addAudit(st, currentOperator(), "撤销重签",
+          { certId: cert.certId, oldCertId: old.certId, workId: work.id, theme: work.theme, holders: cert.holders.map(h => ({ ...h })) });
+        work.logs.push(new Date().toLocaleString("zh-CN") + " 撤销重签 " + old.certId + " → " + cert.certId);
+        return cert;
+      });
+    }
+
+    function txInitiate(certId, from, to, share, type, note) {
+      return transact(st => {
+        const cert = st.certs.find(c => c.certId === certId);
+        if (!cert) throw new Error("证书不存在");
+        if (cert.status === "frozen") throw new Error("证书已质押冻结，禁止发起转移");
+        if (cert.status === "revoked") throw new Error("证书已撤销，禁止发起转移");
+        const operator = currentOperator();
+        if (operator !== from) throw new Error("越权操作：只能以份额持有人本人身份发起转移");
+        const holder = cert.holders.find(h => h.name === from);
+        if (!holder) throw new Error(from + " 不是该证书持有人");
+        to = String(to || "").trim();
+        if (!to) throw new Error("受让方不能为空");
+        if (to === from) throw new Error("受让方不能与转让人相同");
+        share = Number(share);
+        if (!Number.isInteger(share) || share < 1 || share > 100) throw new Error("份额须为 1-100 的整数");
+        const pendingOut = st.transfers
+          .filter(t => t.certId === certId && t.from === from && t.state === "pending")
+          .reduce((a, t) => a + t.share, 0);
+        if (share + pendingOut > holder.share)
+          throw new Error("可转份额不足：持有 " + holder.share + "%，其中待确认 " + pendingOut + "%");
+        if (st.transfers.some(t => t.certId === certId && t.from === from && t.to === to && t.share === share && t.type === type && t.state === "pending"))
+          throw new Error("重复提交：相同的转移单已在待确认中");
+        const t = {
+          id: crypto.randomUUID(), certId, from, to, share, type,
+          note: String(note || "").trim(),
+          state: "pending",
+          initiatedAt: new Date().toISOString(),
+          initiatedBy: operator
+        };
+        st.transfers.push(t);
+        addAudit(st, operator, type === "继承过户" ? "发起继承过户" : "发起转移",
+          { certId, transferId: t.id, from, to, share, type });
+        return t;
+      });
+    }
+
+    function txConfirm(transferId) {
+      return transact(st => {
+        const t = st.transfers.find(x => x.id === transferId);
+        if (!t) throw new Error("转移单不存在");
+        if (t.state !== "pending")
+          throw new Error(t.state === "confirmed"
+            ? "重复确认被拒绝：该转移单已完成，产权只能变更一次"
+            : "转移单已失效，不能确认");
+        const cert = st.certs.find(c => c.certId === t.certId);
+        if (!cert) throw new Error("证书不存在");
+        if (cert.status === "frozen") throw new Error("证书已质押冻结，禁止确认转移");
+        if (cert.status === "revoked") throw new Error("证书已撤销，禁止确认转移");
+        const operator = currentOperator();
+        if (operator !== t.to) throw new Error("越权操作：只能由受让方 " + t.to + " 本人确认");
+        const holder = cert.holders.find(h => h.name === t.from);
+        if (!holder || holder.share < t.share) throw new Error("转让人份额不足，转移单无法履行");
+        holder.share -= t.share;
+        if (holder.share === 0) cert.holders.splice(cert.holders.indexOf(holder), 1);
+        const target = cert.holders.find(h => h.name === t.to);
+        if (target) target.share += t.share;
+        else cert.holders.push({ name: t.to, share: t.share });
+        t.state = "confirmed";
+        t.confirmedAt = new Date().toISOString();
+        addAudit(st, operator, t.type === "继承过户" ? "继承过户完成" : "转移确认",
+          { certId: cert.certId, transferId: t.id, from: t.from, to: t.to, share: t.share, type: t.type,
+            holders: cert.holders.map(h => ({ ...h })) });
+        return t;
+      });
+    }
+
+    function txCancelTransfer(transferId) {
+      return transact(st => {
+        const t = st.transfers.find(x => x.id === transferId);
+        if (!t) throw new Error("转移单不存在");
+        if (t.state !== "pending") throw new Error("转移单已结束，不能撤销");
+        const operator = currentOperator();
+        if (operator !== t.from && operator !== t.to) throw new Error("越权操作：只有转移双方可以撤销转移单");
+        t.state = "cancelled";
+        t.cancelledAt = new Date().toISOString();
+        addAudit(st, operator, "撤销转移单", { certId: t.certId, transferId: t.id, from: t.from, to: t.to, share: t.share });
+        return t;
+      });
+    }
+
+    function txFreeze(certId, pledgee, reason) {
+      return transact(st => {
+        const cert = st.certs.find(c => c.certId === certId);
+        if (!cert) throw new Error("证书不存在");
+        if (cert.status !== "active") throw new Error("仅有效状态的证书可办理质押冻结");
+        const operator = currentOperator();
+        if (!cert.holders.some(h => h.name === operator)) throw new Error("越权操作：只有持有人可以办理质押冻结");
+        pledgee = String(pledgee || "").trim();
+        reason = String(reason || "").trim();
+        if (!pledgee) throw new Error("质权人不能为空");
+        if (!reason) throw new Error("质押事由不能为空");
+        cert.status = "frozen";
+        cert.freeze = { by: operator, pledgee, reason, at: new Date().toISOString() };
+        addAudit(st, operator, "质押冻结", { certId, pledgee, reason });
+        return cert;
+      });
+    }
+
+    function txUnfreeze(certId) {
+      return transact(st => {
+        const cert = st.certs.find(c => c.certId === certId);
+        if (!cert) throw new Error("证书不存在");
+        if (cert.status !== "frozen") throw new Error("证书未处于冻结状态");
+        const operator = currentOperator();
+        if (!cert.holders.some(h => h.name === operator)) throw new Error("越权操作：只有持有人可以解除冻结");
+        const pledgee = cert.freeze ? cert.freeze.pledgee : "";
+        cert.status = "active";
+        cert.freeze = null;
+        addAudit(st, operator, "解除冻结", { certId, pledgee });
+        return cert;
+      });
+    }
+
+    function txRevoke(certId, reason) {
+      return transact(st => {
+        const cert = st.certs.find(c => c.certId === certId);
+        if (!cert) throw new Error("证书不存在");
+        if (cert.status === "revoked") throw new Error("证书已撤销，不能重复撤销");
+        reason = String(reason || "").trim();
+        if (!reason) throw new Error("撤销原因不能为空");
+        const operator = currentOperator();
+        cert.status = "revoked";
+        cert.revoked = { by: operator, reason, at: new Date().toISOString() };
+        cert.freeze = null;
+        const rejected = st.transfers.filter(t => t.certId === certId && t.state === "pending");
+        rejected.forEach(t => { t.state = "rejected"; t.rejectedReason = "证书撤销"; });
+        addAudit(st, operator, "撤销证书", { certId, reason, rejectedTransfers: rejected.map(t => t.id) });
+        return cert;
+      });
+    }
+
+    function txAddWork(data) {
+      return transact(st => {
+        const work = {
+          id: crypto.randomUUID(),
+          base: data.base, theme: data.theme, line: data.line,
+          progress: Number(data.progress), dryDate: data.dryDate, gold: data.gold,
+          defect: data.defect || "", delivery: data.delivery, status: data.status,
+          note: data.note || "",
+          logs: [new Date().toLocaleString("zh-CN") + " 创建作品"]
+        };
+        st.works.unshift(work);
+        return work;
+      });
+    }
+
+    function txUpdateStatus(id, status) {
+      return transact(st => {
+        const work = st.works.find(w => w.id === id);
+        if (!work) throw new Error("作品不存在");
+        work.status = status;
+        if (status === "待阴干") work.dryDate = new Date().toISOString().slice(0, 10);
+        if (status === "上金粉") work.gold = "已上金粉";
+        if (status === "待交付") work.progress = 100;
+        work.logs.push(new Date().toLocaleString("zh-CN") + " 更新为 " + status);
+        return work;
+      });
+    }
+
+    function txRecordDefect(id, text) {
+      return transact(st => {
+        const work = st.works.find(w => w.id === id);
+        if (!work) throw new Error("作品不存在");
+        const value = String(text || "").trim();
+        if (!value) throw new Error("缺陷描述不能为空");
+        work.defect = work.defect ? work.defect + "; " + value : value;
+        work.logs.push(new Date().toLocaleString("zh-CN") + " 缺陷：" + value);
+        return work;
+      });
+    }
+
+    function txImport(imported) {
+      return transact(() => {
+        const st = normalizeState(imported);
+        addAudit(st, currentOperator(), "导入恢复",
+          { works: st.works.length, certs: st.certs.length, transfers: st.transfers.length });
+        const report = verifyAll(st);
+        return { __replace: true, state: st, result: report };
+      });
+    }
+
+    /* ============ 界面 ============ */
     const form = document.querySelector("#workForm");
     const board = document.querySelector("#board");
     const statusFilter = document.querySelector("#statusFilter");
     const themeFilter = document.querySelector("#themeFilter");
     const sortMode = document.querySelector("#sortMode");
     const dialog = document.querySelector("#detailDialog");
+    const issueDialog = document.querySelector("#issueDialog");
+    const transferDialog = document.querySelector("#transferDialog");
+    const freezeDialog = document.querySelector("#freezeDialog");
+    const revokeDialog = document.querySelector("#revokeDialog");
+    const verifyDialog = document.querySelector("#verifyDialog");
+    const recordsDialog = document.querySelector("#recordsDialog");
+    const operatorInput = document.querySelector("#operatorInput");
+
+    let activeId = null;
+    let issueWorkId = null;
+    let transferCertId = null;
+    let freezeCertId = null;
+    let revokeCertId = null;
+    let toastTimer = null;
 
     form.dryDate.value = today;
     form.delivery.value = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
     statusFilter.innerHTML = `<option value="">全部状态</option>` + statuses.map(s => `<option>${s}</option>`).join("");
+    operatorInput.value = currentOperator();
+    operatorInput.addEventListener("input", () => sessionStorage.setItem(OPERATOR_KEY, operatorInput.value.trim()));
 
-    function save() {
-      localStorage.setItem(storageKey, JSON.stringify(works));
+    function toast(msg, ok) {
+      const el = document.querySelector("#toast");
+      el.textContent = msg;
+      el.className = ok ? "show ok" : "show err";
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { el.className = ""; }, 4200);
+    }
+
+    async function runTx(promise, okMsg) {
+      const r = await promise;
+      if (r.ok) { if (okMsg) toast(typeof okMsg === "function" ? okMsg(r.result) : okMsg, true); }
+      else toast(r.error, false);
+      return r;
     }
 
     function filtered() {
-      return works
+      return state.works
         .filter(w => !statusFilter.value || w.status === statusFilter.value)
         .filter(w => !themeFilter.value || w.theme.includes(themeFilter.value.trim()))
         .sort((a, b) => (a[sortMode.value] || "").localeCompare(b[sortMode.value] || ""));
     }
 
-    function updateStatus(id, status) {
-      const work = works.find(w => w.id === id);
-      work.status = status;
-      if (status === "待阴干") work.dryDate = new Date().toISOString().slice(0, 10);
-      if (status === "上金粉") work.gold = "已上金粉";
-      if (status === "待交付") work.progress = 100;
-      work.logs.push(`${new Date().toLocaleString()} 更新为 ${status}`);
-      save();
-      render();
-    }
-
-    function recordDefect(id, text) {
-      const work = works.find(w => w.id === id);
-      const value = text || prompt("输入断线/翘线位置");
-      if (!value) return;
-      work.defect = work.defect ? `${work.defect}; ${value}` : value;
-      work.logs.push(`${new Date().toLocaleString()} 缺陷：${value}`);
-      save();
-      render();
-    }
-
-    function showDetail(id) {
-      activeId = id;
-      const w = works.find(item => item.id === id);
-      document.querySelector("#detailTitle").textContent = `${w.theme} · ${w.base}`;
-      document.querySelector("#detailContent").innerHTML = `
-        胎体材质：${w.base}<br>线条粗细：${w.line}<br>贴线进度：${w.progress}%<br>
-        阴干日期：${w.dryDate}<br>金粉状态：${w.gold}<br>缺陷位置：${w.defect || "无"}<br>
-        交付日期：${w.delivery}<br>当前状态：${w.status}<br>备注：${w.note || "无"}<br>
-        流转记录：${w.logs.join(" / ")}
-      `;
-      document.querySelector("#defectInput").value = "";
-      dialog.showModal();
-    }
-
     function renderSummaries() {
-      const todayDry = works.filter(w => w.dryDate <= today && w.status === "待阴干");
-      const defects = works.filter(w => w.defect);
-      const delivery = [...works].sort((a, b) => a.delivery.localeCompare(b.delivery)).slice(0, 4);
-      document.querySelector("#todayDry").innerHTML = todayDry.length ? todayDry.map(w => `<div class="item" onclick="showDetail('${w.id}')"><b>${w.theme}</b><div class="meta">${w.base} · ${w.dryDate}</div></div>`).join("") : `<div class="empty">暂无</div>`;
-      document.querySelector("#defectList").innerHTML = defects.length ? defects.map(w => `<div class="item overdue" onclick="showDetail('${w.id}')"><b>${w.theme}</b><div class="meta">${w.defect}</div></div>`).join("") : `<div class="empty">暂无</div>`;
-      document.querySelector("#deliveryList").innerHTML = delivery.map(w => `<div class="item" onclick="showDetail('${w.id}')"><b>${w.theme}</b><div class="meta">${w.delivery} · ${w.status}</div></div>`).join("");
+      const todayDry = state.works.filter(w => w.dryDate <= today && w.status === "待阴干");
+      const defects = state.works.filter(w => w.defect);
+      const delivery = [...state.works].sort((a, b) => a.delivery.localeCompare(b.delivery)).slice(0, 4);
+      document.querySelector("#todayDry").innerHTML = todayDry.length ? todayDry.map(w => `<div class="item" onclick="showDetail('${w.id}')"><b>${esc(w.theme)}</b><div class="meta">${esc(w.base)} · ${w.dryDate}</div></div>`).join("") : `<div class="empty">暂无</div>`;
+      document.querySelector("#defectList").innerHTML = defects.length ? defects.map(w => `<div class="item overdue" onclick="showDetail('${w.id}')"><b>${esc(w.theme)}</b><div class="meta">${esc(w.defect)}</div></div>`).join("") : `<div class="empty">暂无</div>`;
+      document.querySelector("#deliveryList").innerHTML = delivery.map(w => `<div class="item" onclick="showDetail('${w.id}')"><b>${esc(w.theme)}</b><div class="meta">${w.delivery} · ${w.status}</div></div>`).join("");
     }
 
     function renderBoard() {
@@ -219,8 +894,8 @@
         return `<section class="col">
           <h3><span>${status}</span><span>${cards.length}</span></h3>
           ${cards.length ? cards.map(w => `<article class="item ${w.defect ? "overdue" : ""}" onclick="showDetail('${w.id}')">
-            <b>${w.theme}</b>
-            <div class="meta">${w.base} · ${w.line}<br>进度 ${w.progress}% · 阴干 ${w.dryDate}<br>金粉：${w.gold} · 交付：${w.delivery}<br>${w.defect ? "缺陷：" + w.defect : "缺陷：无"}</div>
+            <b>${esc(w.theme)}</b>
+            <div class="meta">${esc(w.base)} · ${w.line}<br>进度 ${w.progress}% · 阴干 ${w.dryDate}<br>金粉：${w.gold} · 交付：${w.delivery}<br>${w.defect ? "缺陷：" + esc(w.defect) : "缺陷：无"}</div>
             <div class="actions" onclick="event.stopPropagation()">
               ${statuses.map(s => `<button class="${s === status ? "secondary" : ""}" onclick="updateStatus('${w.id}', '${s}')">${s}</button>`).join("")}
               <button class="warn" onclick="recordDefect('${w.id}')">记缺陷</button>
@@ -230,38 +905,247 @@
       }).join("");
     }
 
+    function auditSummary(a) {
+      const d = a.detail || {};
+      const holdersTxt = hs => (hs || []).map(h => esc(h.name) + " " + h.share + "%").join("、");
+      switch (a.action) {
+        case "签发证书": case "补发证书": return `${d.certId} · ${esc(d.theme || "")} · 持有人 ${holdersTxt(d.holders)}`;
+        case "撤销重签": return `${esc(d.oldCertId)} → ${d.certId} · 持有人 ${holdersTxt(d.holders)}`;
+        case "发起转移": case "发起继承过户": return `${d.certId} · ${esc(d.from)} → ${esc(d.to)} ${d.share}%`;
+        case "转移确认": case "继承过户完成": return `${d.certId} · ${esc(d.from)} → ${esc(d.to)} ${d.share}%`;
+        case "撤销转移单": return `${d.certId} · ${esc(d.from)} → ${esc(d.to)} ${d.share}% 撤回`;
+        case "质押冻结": return `${d.certId} · 质权人 ${esc(d.pledgee)}（${esc(d.reason)}）`;
+        case "解除冻结": return `${d.certId} · 质权人 ${esc(d.pledgee || "")}`;
+        case "撤销证书": return `${d.certId} · ${esc(d.reason)}`;
+        case "导入恢复": return `作品 ${d.works} · 证书 ${d.certs} · 转移单 ${d.transfers}`;
+        default: return "";
+      }
+    }
+
+    function renderCertSection() {
+      const issuable = state.works.filter(w => w.status === "待交付" && !state.certs.some(c => c.workId === w.id && c.status !== "revoked"));
+      document.querySelector("#issuableList").innerHTML = issuable.length ? issuable.map(w => `
+        <div class="item static">
+          <b>${esc(w.theme)}</b>
+          <div class="meta">${esc(w.base)} · 交付 ${w.delivery}${w.legacy ? " · 旧作品" : ""}</div>
+          <div class="actions"><button onclick="uiOpenIssue('${w.id}')">${w.legacy ? "补发证书" : "签发证书"}</button></div>
+        </div>`).join("") : `<div class="empty">暂无待签发作品</div>`;
+
+      const pending = state.transfers.filter(t => t.state === "pending").slice().reverse();
+      document.querySelector("#pendingList").innerHTML = pending.length ? pending.map(t => `
+        <div class="item static">
+          <b>${esc(t.from)} → ${esc(t.to)}</b> ${t.share}%
+          <div class="meta">${esc(t.type)} · ${t.certId} · ${fmtTime(t.initiatedAt)}${t.note ? " · " + esc(t.note) : ""}</div>
+          <div class="actions">
+            <button onclick="uiConfirmTransfer('${t.id}')">受让方确认</button>
+            <button class="secondary" onclick="uiCancelTransfer('${t.id}')">撤销</button>
+          </div>
+        </div>`).join("") : `<div class="empty">暂无待确认转移</div>`;
+
+      const recent = state.audit.slice(-8).reverse();
+      document.querySelector("#auditList").innerHTML = recent.length ? recent.map(a =>
+        `<div class="logrow">#${a.seq} ${fmtTime(a.time)}<br>${esc(a.actor)} · ${esc(a.action)} · ${auditSummary(a)}</div>`
+      ).join("") : `<div class="empty">暂无记录</div>`;
+
+      const certs = state.certs.slice().reverse();
+      document.querySelector("#certList").innerHTML = certs.length ? certs.map(c => {
+        const work = state.works.find(w => w.id === c.workId);
+        const badges = [`<span class="badge ${c.status}">${CERT_STATUS[c.status]}</span>`];
+        if (c.backfilled) badges.push(`<span class="badge back">补发</span>`);
+        if (c.supersedes) badges.push(`<span class="badge plain">重签自 ${esc(c.supersedes)}</span>`);
+        return `<article class="cert ${c.status}" data-cert="${esc(c.certId)}">
+          <div class="cert-head"><b>${esc(c.certId)}</b>${badges.join("")}</div>
+          <div class="meta">
+            ${esc(c.features.theme)} · ${esc(c.features.base)}${work ? "" : "（作品记录已缺失）"}<br>
+            持有人：${c.holders.map(h => `${esc(h.name)} ${h.share}%`).join("、")}<br>
+            签发：${fmtTime(c.issuedAt)} · ${esc(c.issuedBy)}<br>
+            <span class="mono">指纹 ${c.fingerprint.slice(0, 16)}… · 签章 ${c.seal.slice(0, 16)}…</span>
+            ${c.status === "frozen" && c.freeze ? `<br>质押：${esc(c.freeze.pledgee)}（${esc(c.freeze.reason)}）· ${fmtTime(c.freeze.at)}` : ""}
+            ${c.status === "revoked" && c.revoked ? `<br>撤销：${esc(c.revoked.reason)} · ${fmtTime(c.revoked.at)} · ${esc(c.revoked.by)}` : ""}
+          </div>
+          <div class="actions">
+            <button onclick="uiVerify('${esc(c.certId)}')">校验</button>
+            ${c.status === "active" ? `<button onclick="uiOpenTransfer('${esc(c.certId)}')">发起转移</button>
+              <button class="warn" onclick="uiOpenFreeze('${esc(c.certId)}')">质押冻结</button>
+              <button class="danger" onclick="uiOpenRevoke('${esc(c.certId)}')">撤销证书</button>` : ""}
+            ${c.status === "frozen" ? `<button onclick="uiUnfreeze('${esc(c.certId)}')">解除冻结</button>
+              <button class="danger" onclick="uiOpenRevoke('${esc(c.certId)}')">撤销证书</button>` : ""}
+            ${c.status === "revoked" ? `<button class="violet" onclick="uiReissue('${esc(c.certId)}')">重签证书</button>` : ""}
+            <button class="secondary" onclick="uiRecords('${esc(c.certId)}')">流转记录</button>
+          </div>
+        </article>`;
+      }).join("") : `<div class="empty">尚未签发任何证书</div>`;
+    }
+
     function render() {
       renderSummaries();
       renderBoard();
+      renderCertSection();
     }
 
-    form.addEventListener("submit", event => {
+    /* ============ 作品操作 ============ */
+    function updateStatus(id, status) {
+      runTx(txUpdateStatus(id, status));
+    }
+
+    function recordDefect(id, text) {
+      const value = text || prompt("输入断线/翘线位置");
+      if (!value) return;
+      runTx(txRecordDefect(id, value));
+    }
+
+    function showDetail(id) {
+      activeId = id;
+      const w = state.works.find(item => item.id === id);
+      if (!w) return;
+      document.querySelector("#detailTitle").textContent = `${w.theme} · ${w.base}`;
+      const certs = state.certs.filter(c => c.workId === id);
+      document.querySelector("#detailContent").innerHTML = `
+        胎体材质：${esc(w.base)}<br>线条粗细：${w.line}<br>贴线进度：${w.progress}%<br>
+        阴干日期：${w.dryDate}<br>金粉状态：${w.gold}<br>缺陷位置：${esc(w.defect) || "无"}<br>
+        交付日期：${w.delivery}<br>当前状态：${w.status}<br>备注：${esc(w.note) || "无"}<br>
+        防伪证书：${certs.length ? certs.map(c => `${c.certId}（${CERT_STATUS[c.status]}）`).join("、") : "未签发"}<br>
+        流转记录：${w.logs.map(esc).join(" / ")}
+      `;
+      document.querySelector("#defectInput").value = "";
+      dialog.showModal();
+    }
+
+    /* ============ 证书 UI 动作 ============ */
+    function uiOpenIssue(workId) {
+      const w = state.works.find(x => x.id === workId);
+      if (!w) return;
+      issueWorkId = workId;
+      document.querySelector("#issueTitle").textContent = w.legacy ? "补发防伪证书（旧作品）" : "签发防伪证书";
+      document.querySelector("#issueWorkInfo").innerHTML =
+        `${esc(w.theme)} · ${esc(w.base)} ｜ ${w.line} ｜ 金粉：${w.gold} ｜ 交付：${w.delivery}`;
+      document.querySelector("#holderRows").innerHTML = "";
+      addHolderRow("", "");
+      issueDialog.showModal();
+    }
+
+    function addHolderRow(name, share) {
+      const row = document.createElement("div");
+      row.className = "holder-row";
+      row.innerHTML = `<input class="h-name" placeholder="持有人姓名" value="${esc(name || "")}">
+        <input class="h-share" type="number" min="1" max="100" placeholder="份额%">
+        <button type="button" class="danger h-del">删除</button>`;
+      if (share !== "" && share != null) row.querySelector(".h-share").value = share;
+      row.querySelector(".h-del").addEventListener("click", () => { row.remove(); updateShareSum(); });
+      row.querySelectorAll("input").forEach(i => i.addEventListener("input", updateShareSum));
+      document.querySelector("#holderRows").appendChild(row);
+      updateShareSum();
+    }
+
+    function readHolderRows() {
+      return [...document.querySelectorAll("#holderRows .holder-row")].map(r => ({
+        name: r.querySelector(".h-name").value,
+        share: r.querySelector(".h-share").value
+      })).filter(h => h.name.trim() !== "" || String(h.share).trim() !== "");
+    }
+
+    function updateShareSum() {
+      const rows = readHolderRows();
+      const sum = rows.reduce((a, h) => a + (Number(h.share) || 0), 0);
+      document.querySelector("#shareSum").textContent = `当前份额合计：${sum}%（须等于 100%）`;
+    }
+
+    function uiOpenTransfer(certId) {
+      const cert = state.certs.find(c => c.certId === certId);
+      if (!cert) return;
+      transferCertId = certId;
+      document.querySelector("#transferCertInfo").innerHTML =
+        `${esc(certId)} ｜ ${esc(cert.features.theme)} · ${esc(cert.features.base)}<br>持有人：${cert.holders.map(h => `${esc(h.name)} ${h.share}%`).join("、")}`;
+      const fromSel = document.querySelector("#tFrom");
+      fromSel.innerHTML = cert.holders.map(h => `<option value="${esc(h.name)}">${esc(h.name)}（${h.share}%）</option>`).join("");
+      if (cert.holders.some(h => h.name === currentOperator())) fromSel.value = currentOperator();
+      document.querySelector("#tTo").value = "";
+      document.querySelector("#tShare").value = "";
+      document.querySelector("#tType").value = "普通转让";
+      document.querySelector("#tNote").value = "";
+      transferDialog.showModal();
+    }
+
+    function uiConfirmTransfer(transferId) {
+      runTx(txConfirm(transferId), t => `转移完成：${t.from} → ${t.to} ${t.share}%`);
+    }
+
+    function uiCancelTransfer(transferId) {
+      runTx(txCancelTransfer(transferId), "转移单已撤销");
+    }
+
+    function uiOpenFreeze(certId) {
+      freezeCertId = certId;
+      document.querySelector("#freezeCertInfo").textContent = certId;
+      document.querySelector("#fPledgee").value = "";
+      document.querySelector("#fReason").value = "";
+      freezeDialog.showModal();
+    }
+
+    function uiUnfreeze(certId) {
+      runTx(txUnfreeze(certId), "已解除质押冻结");
+    }
+
+    function uiOpenRevoke(certId) {
+      revokeCertId = certId;
+      document.querySelector("#revokeCertInfo").textContent = certId;
+      document.querySelector("#rReason").value = "";
+      revokeDialog.showModal();
+    }
+
+    function uiReissue(certId) {
+      runTx(txReissue(certId), c => `已重签新证书：${c.certId}`);
+    }
+
+    function uiVerify(certId) {
+      const input = String(certId || document.querySelector("#verifyInput").value || "").trim();
+      const r = verifyCert(state, input);
+      const box = document.querySelector("#verifyResult");
+      if (!r.found) {
+        box.innerHTML = `<div class="verdict bad">未找到证书 ${esc(input) || "（未输入编号）"}</div>`;
+      } else {
+        const c = r.cert;
+        box.innerHTML = `
+          <div class="verdict ${r.authentic ? "good" : "bad"}">${r.authentic ? "✔ 校验通过：真实证书" : "✘ 校验未通过：疑似篡改或伪造"}</div>
+          <div class="meta" style="margin-top:8px">
+            编号：${esc(c.certId)} ｜ 状态：${CERT_STATUS[c.status]}${c.backfilled ? " ｜ 补发" : ""}${c.supersedes ? ` ｜ 重签自 ${esc(c.supersedes)}` : ""}<br>
+            作品：${esc(c.features.theme)} · ${esc(c.features.base)}（${esc(c.features.line)} · ${esc(c.features.gold)}）<br>
+            当前持有人：${c.holders.map(h => `${esc(h.name)} ${h.share}%`).join("、")}<br>
+            签发：${fmtTime(c.issuedAt)} · ${esc(c.issuedBy)}<br>
+            <span class="mono">指纹 ${c.fingerprint}<br>签章 ${c.seal}</span>
+          </div>
+          ${r.problems.length
+            ? `<ul class="problems">${r.problems.map(p => `<li>${esc(p)}</li>`).join("")}</ul>`
+            : `<div class="meta" style="margin-top:6px">特征指纹、证书签章、证书链与产权台账回放全部一致。</div>`}
+        `;
+      }
+      verifyDialog.showModal();
+    }
+
+    function uiRecords(certId) {
+      const entries = state.audit.filter(a => a.detail && a.detail.certId === certId);
+      document.querySelector("#recordsTitle").textContent = `流转记录 · ${certId}`;
+      document.querySelector("#recordsList").innerHTML = entries.length ? entries.map(a =>
+        `<div class="logrow">#${a.seq} ${fmtTime(a.time)} ｜ ${esc(a.actor)} ｜ <b>${esc(a.action)}</b> ｜ ${auditSummary(a)}<br><span class="mono">hash ${a.hash.slice(0, 24)}…</span></div>`
+      ).join("") : `<div class="empty">暂无记录</div>`;
+      recordsDialog.showModal();
+    }
+
+    /* ============ 事件绑定 ============ */
+    form.addEventListener("submit", async event => {
       event.preventDefault();
       const data = Object.fromEntries(new FormData(form).entries());
-      works.unshift({
-        id: crypto.randomUUID(),
-        base: data.base,
-        theme: data.theme,
-        line: data.line,
-        progress: Number(data.progress),
-        dryDate: data.dryDate,
-        gold: data.gold,
-        defect: data.defect,
-        delivery: data.delivery,
-        status: data.status,
-        note: data.note,
-        logs: [`${new Date().toLocaleString()} 创建作品`]
-      });
-      form.reset();
-      form.dryDate.value = today;
-      form.delivery.value = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
-      save();
-      render();
+      const r = await runTx(txAddWork(data), "作品已加入工坊");
+      if (r.ok) {
+        form.reset();
+        form.dryDate.value = today;
+        form.delivery.value = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+      }
     });
 
-    document.querySelector("#saveDefect").addEventListener("click", () => {
-      recordDefect(activeId, document.querySelector("#defectInput").value.trim());
-      showDetail(activeId);
+    document.querySelector("#saveDefect").addEventListener("click", async () => {
+      const r = await runTx(txRecordDefect(activeId, document.querySelector("#defectInput").value.trim()));
+      if (r.ok) showDetail(activeId);
     });
     document.querySelector("#closeDialog").addEventListener("click", () => dialog.close());
     document.querySelector("#clearFilters").addEventListener("click", () => {
@@ -270,19 +1154,107 @@
       render();
     });
     [statusFilter, themeFilter, sortMode].forEach(el => el.addEventListener("input", render));
+
+    document.querySelector("#addHolderRow").addEventListener("click", () => addHolderRow("", ""));
+    document.querySelector("#cancelIssue").addEventListener("click", () => issueDialog.close());
+    document.querySelector("#confirmIssue").addEventListener("click", async () => {
+      const r = await runTx(txIssue(issueWorkId, readHolderRows()), c => `证书已签发：${c.certId}`);
+      if (r.ok) issueDialog.close();
+    });
+
+    document.querySelector("#cancelTransfer").addEventListener("click", () => transferDialog.close());
+    document.querySelector("#submitTransfer").addEventListener("click", async () => {
+      const r = await runTx(
+        txInitiate(transferCertId,
+          document.querySelector("#tFrom").value,
+          document.querySelector("#tTo").value,
+          document.querySelector("#tShare").value,
+          document.querySelector("#tType").value,
+          document.querySelector("#tNote").value),
+        t => `转移单已提交，待 ${t.to} 确认`
+      );
+      if (r.ok) transferDialog.close();
+    });
+
+    document.querySelector("#cancelFreeze").addEventListener("click", () => freezeDialog.close());
+    document.querySelector("#submitFreeze").addEventListener("click", async () => {
+      const r = await runTx(txFreeze(freezeCertId, document.querySelector("#fPledgee").value, document.querySelector("#fReason").value), "证书已质押冻结");
+      if (r.ok) freezeDialog.close();
+    });
+
+    document.querySelector("#cancelRevoke").addEventListener("click", () => revokeDialog.close());
+    document.querySelector("#submitRevoke").addEventListener("click", async () => {
+      const r = await runTx(txRevoke(revokeCertId, document.querySelector("#rReason").value), "证书已撤销");
+      if (r.ok) revokeDialog.close();
+    });
+
+    document.querySelector("#verifyBtn").addEventListener("click", () => uiVerify());
+    document.querySelector("#verifyChainBtn").addEventListener("click", () => {
+      const r = verifyAuditChain(state);
+      toast(r.ok ? `台账链完整，共 ${state.audit.length} 条记录` : `台账链第 ${r.badSeq} 条记录起被篡改`, r.ok);
+    });
+    document.querySelector("#closeVerify").addEventListener("click", () => verifyDialog.close());
+    document.querySelector("#closeRecords").addEventListener("click", () => recordsDialog.close());
+
     document.querySelector("#exportBtn").addEventListener("click", () => {
-      const blob = new Blob([JSON.stringify(works, null, 2)], { type: "application/json" });
+      const payload = { app: "zfl42", version: 1, exportedAt: new Date().toISOString(), state };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
-      link.download = "lacquer-thread-works.json";
+      link.download = "lacquer-works-full.json";
       link.click();
       URL.revokeObjectURL(link.href);
     });
 
+    document.querySelector("#importBtn").addEventListener("click", () => document.querySelector("#importFile").click());
+    document.querySelector("#importFile").addEventListener("change", async event => {
+      const file = event.target.files[0];
+      event.target.value = "";
+      if (!file) return;
+      let parsed;
+      try { parsed = JSON.parse(await file.text()); }
+      catch (e) { toast("导入失败：不是有效的 JSON 文件", false); return; }
+      if (!parsed || parsed.app !== "zfl42" || !parsed.state) { toast("导入失败：文件格式不正确", false); return; }
+      const r = await runTx(txImport(parsed.state));
+      if (r.ok) {
+        const rep = r.result;
+        toast(rep.chainOk && !rep.badCerts.length
+          ? `导入完成：作品 ${state.works.length} · 证书 ${state.certs.length}，台账链完整`
+          : `导入完成但校验异常：${rep.chainOk ? "" : "台账链第 " + rep.badSeq + " 条起被篡改 "}${rep.badCerts.length ? "问题证书 " + rep.badCerts.join("、") : ""}`,
+          rep.chainOk && !rep.badCerts.length);
+      }
+    });
+
+    window.addEventListener("storage", e => {
+      if (e.key === STORE_KEY) {
+        const fresh = loadState();
+        if (fresh) { state = fresh; render(); }
+      }
+    });
+
+    /* ============ 测试与调试钩子 ============ */
+    window.ZFL = {
+      get state() { return state; },
+      sha256Hex, canonical, verifyAuditChain, replayCert,
+      verifyCert: id => verifyCert(state, id),
+      verifyAll: () => verifyAll(state),
+      setOperator: name => { sessionStorage.setItem(OPERATOR_KEY, name); operatorInput.value = name; },
+      txIssue, txReissue, txInitiate, txConfirm, txCancelTransfer, txFreeze, txUnfreeze, txRevoke
+    };
     window.updateStatus = updateStatus;
     window.recordDefect = recordDefect;
     window.showDetail = showDetail;
-    save();
+    window.uiOpenIssue = uiOpenIssue;
+    window.uiOpenTransfer = uiOpenTransfer;
+    window.uiConfirmTransfer = uiConfirmTransfer;
+    window.uiCancelTransfer = uiCancelTransfer;
+    window.uiOpenFreeze = uiOpenFreeze;
+    window.uiUnfreeze = uiUnfreeze;
+    window.uiOpenRevoke = uiOpenRevoke;
+    window.uiReissue = uiReissue;
+    window.uiVerify = uiVerify;
+    window.uiRecords = uiRecords;
+
     render();
   </script>
 </body>

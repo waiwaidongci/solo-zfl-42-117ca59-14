@@ -1,0 +1,12 @@
+{
+  "name": "zfl42-lacquer-workshop",
+  "version": "1.0.0",
+  "description": "小型漆线雕工坊管理：作品流转 + 已交付作品防伪证书与产权转移台",
+  "private": true,
+  "scripts": {
+    "test": "node tests/run.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.63.0"
+  }
+}
