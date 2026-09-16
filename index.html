@@ -482,6 +482,29 @@
       return key(a) === key(b);
     }
 
+    /* 从台账回放重建每张转移单的发起、确认、撤销与失效状态 */
+    function replayTransfers(st) {
+      const map = new Map();
+      for (const e of st.audit) {
+        const d = e.detail || {};
+        if (e.action === "发起转移" || e.action === "发起继承过户") {
+          map.set(d.transferId, { from: d.from, to: d.to, share: d.share, type: d.type, state: "pending" });
+        } else if (e.action === "转移确认" || e.action === "继承过户完成") {
+          const t = map.get(d.transferId);
+          if (t) t.state = "confirmed";
+        } else if (e.action === "撤销转移单") {
+          const t = map.get(d.transferId);
+          if (t) t.state = "cancelled";
+        } else if (e.action === "撤销证书" && Array.isArray(d.rejectedTransfers)) {
+          for (const id of d.rejectedTransfers) {
+            const t = map.get(id);
+            if (t) t.state = "rejected";
+          }
+        }
+      }
+      return map;
+    }
+
     function verifyCert(st, certId) {
       const cert = st.certs.find(c => c.certId === certId);
       if (!cert) return { found: false, authentic: false, problems: ["证书编号不存在"] };
@@ -856,6 +879,18 @@
       for (const t of st.transfers)
         if (!st.certs.some(c => c.certId === t.certId))
           throw new Error("转移单引用了不存在的证书 " + t.certId);
+      const replayed = replayTransfers(st);
+      for (const t of st.transfers) {
+        const r = replayed.get(t.id);
+        if (!r) throw new Error("转移单 " + t.id + " 在台账中缺少发起记录");
+        if (r.from !== t.from || r.to !== t.to || r.share !== t.share || r.type !== t.type)
+          throw new Error("转移单 " + t.id + " 的来源、受让方、份额或类型与台账不符");
+        if (r.state !== t.state)
+          throw new Error("转移单 " + t.id + " 的状态与台账回放不符（台账记载为 " + r.state + "）");
+      }
+      for (const id of replayed.keys())
+        if (!st.transfers.some(t => t.id === id))
+          throw new Error("备份缺少台账记载的转移单 " + id);
     }
 
     function txImport(rawState) {

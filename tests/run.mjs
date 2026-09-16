@@ -456,6 +456,85 @@ try {
   assert(await page6.evaluate(() => window.ZFL.verifyAll().badCerts.length === 0), "恢复后全部证书校验为真");
   await ctx5.close();
 
+  /* ---------- S13 转移单台账回放：防改回待确认与字段篡改 ---------- */
+  scenario = "S13-转移单回放校验";
+  const ctx6 = await browser.newContext();
+  const page7 = await ctx6.newPage();
+  await page7.goto(base, { waitUntil: "load" });
+  await page7.evaluate(() => window.ZFL.setOperator("工坊主"));
+  const widA = await page7.evaluate(() => window.ZFL.state.works.find(w => w.status === "待交付").id);
+  const issA = await page7.evaluate(id => window.ZFL.txIssue(id, [{ name: "张三", share: 100 }]), widA);
+  const certA13 = issA.result.certId;
+  await page7.evaluate(() => window.ZFL.setOperator("张三"));
+  const t13a = (await page7.evaluate(c => window.ZFL.txInitiate(c, "张三", "李四", 40, "普通转让", ""), certA13)).result.id;
+  await page7.evaluate(() => window.ZFL.setOperator("李四"));
+  assert((await page7.evaluate(t => window.ZFL.txConfirm(t), t13a)).ok, "准备：转移单 t13a 已确认");
+  await page7.evaluate(() => window.ZFL.setOperator("张三"));
+  const t13b = (await page7.evaluate(c => window.ZFL.txInitiate(c, "张三", "王五", 20, "普通转让", ""), certA13)).result.id;
+  const t13c = (await page7.evaluate(c => window.ZFL.txInitiate(c, "张三", "赵六", 10, "普通转让", ""), certA13)).result.id;
+  assert((await page7.evaluate(t => window.ZFL.txCancelTransfer(t), t13c)).ok, "准备：转移单 t13c 已撤销");
+  await page7.locator("#workForm input[name=base]").fill("木胎插屏");
+  await page7.locator("#workForm input[name=theme]").fill("松鹤延年");
+  await page7.locator("#workForm select[name=status]").selectOption("待交付");
+  await page7.locator("#workForm button[type=submit]").click();
+  await toastText(page7, /作品已加入工坊/);
+  const widB = await page7.evaluate(() => window.ZFL.state.works.find(w => w.theme === "松鹤延年").id);
+  const issB = await page7.evaluate(id => window.ZFL.txIssue(id, [{ name: "孙八", share: 100 }]), widB);
+  const certB13 = issB.result.certId;
+  await page7.evaluate(() => window.ZFL.setOperator("孙八"));
+  const t13d = (await page7.evaluate(c => window.ZFL.txInitiate(c, "孙八", "钱七", 30, "普通转让", ""), certB13)).result.id;
+  assert((await page7.evaluate(c => window.ZFL.txRevoke(c, "信息登记错误"), certB13)).ok, "准备：证书 B 撤销，转移单 t13d 失效");
+  const [dl7] = await Promise.all([page7.waitForEvent("download"), page7.click("#exportBtn")]);
+  const valid7Path = await dl7.path();
+  const valid7 = JSON.parse(await readFile(valid7Path, "utf8"));
+  const clone7 = () => JSON.parse(JSON.stringify(valid7));
+  const stateStr7 = () => page7.evaluate(() => localStorage.getItem("zfl42State"));
+  async function badImport7(obj, re, label) {
+    const p = `/tmp/zfl-bad13-${label}.json`;
+    await writeFile(p, JSON.stringify(obj));
+    const before = await stateStr7();
+    await page7.setInputFiles("#importFile", p);
+    const t = await toastText(page7, re);
+    assert(re.test(t), `${label}被拒绝：${t}`);
+    assert(await stateStr7() === before, `${label}后作品、证书、转移单与台账保持原样`);
+  }
+  const backToPending = clone7();
+  delete backToPending.state.transfers.find(t => t.id === t13a).confirmedAt;
+  backToPending.state.transfers.find(t => t.id === t13a).state = "pending";
+  await badImport7(backToPending, /导入失败：转移单 .* 的状态与台账回放不符/, "已确认改回待确认");
+  const rejToPending = clone7();
+  delete rejToPending.state.transfers.find(t => t.id === t13d).rejectedReason;
+  rejToPending.state.transfers.find(t => t.id === t13d).state = "pending";
+  await badImport7(rejToPending, /导入失败：转移单 .* 的状态与台账回放不符/, "已失效改回待确认");
+  const badFrom = clone7();
+  badFrom.state.transfers.find(t => t.id === t13a).from = "黑客";
+  await badImport7(badFrom, /导入失败：转移单 .* 的来源、受让方、份额或类型与台账不符/, "篡改转让人");
+  const badTo = clone7();
+  badTo.state.transfers.find(t => t.id === t13a).to = "黑客";
+  await badImport7(badTo, /导入失败：转移单 .* 的来源、受让方、份额或类型与台账不符/, "篡改受让方");
+  const badShare = clone7();
+  badShare.state.transfers.find(t => t.id === t13a).share = 99;
+  await badImport7(badShare, /导入失败：转移单 .* 的来源、受让方、份额或类型与台账不符/, "篡改份额");
+  // 正常恢复
+  await page7.setInputFiles("#importFile", valid7Path);
+  txt = await toastText(page7, /导入完成：作品 \d+ · 证书 \d+，台账链完整/);
+  assert(/导入完成/.test(txt), `正常恢复成功：${txt}`);
+  const reconfirm = await page7.evaluate(t => window.ZFL.txConfirm(t), t13a);
+  assert(!reconfirm.ok && /重复确认|只能变更一次/.test(reconfirm.error), `恢复后已确认转移单再确认被拒绝：${reconfirm.error}`);
+  let st7 = await page7.evaluate(() => JSON.parse(JSON.stringify(window.ZFL.state)));
+  assert(holdersOf(st7, certA13) === "张三:60,李四:40", "恢复后证书持有人未被重复确认改变");
+  const rejConfirm = await page7.evaluate(t => window.ZFL.txConfirm(t), t13d);
+  assert(!rejConfirm.ok && /失效|不能确认/.test(rejConfirm.error), `恢复后失效转移单确认被拒绝：${rejConfirm.error}`);
+  await page7.evaluate(() => window.ZFL.setOperator("王五"));
+  assert((await page7.evaluate(t => window.ZFL.txConfirm(t), t13b)).ok, "恢复后正常待确认转移单仍可按流程确认");
+  st7 = await page7.evaluate(() => JSON.parse(JSON.stringify(window.ZFL.state)));
+  assert(holdersOf(st7, certA13) === "张三:40,李四:40,王五:20", "确认后份额正确（张三40/李四40/王五20）");
+  await page7.reload({ waitUntil: "load" });
+  st7 = await page7.evaluate(() => JSON.parse(JSON.stringify(window.ZFL.state)));
+  assert(holdersOf(st7, certA13) === "张三:40,李四:40,王五:20" && st7.transfers.find(t => t.id === t13a).state === "confirmed", "刷新后转移单状态与产权保持一致");
+  assert(await page7.evaluate(() => window.ZFL.verifyAll().badCerts.length === 0), "刷新后全部证书校验为真");
+  await ctx6.close();
+
   assert(pageErrors.length === 0, `全程无页面脚本错误${pageErrors.length ? "：" + pageErrors[0] : ""}`);
   console.log(`\n全部场景通过，共 ${passed} 项断言。`);
 } catch (e) {
