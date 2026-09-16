@@ -488,7 +488,7 @@
       for (const e of st.audit) {
         const d = e.detail || {};
         if (e.action === "发起转移" || e.action === "发起继承过户") {
-          map.set(d.transferId, { from: d.from, to: d.to, share: d.share, type: d.type, state: "pending" });
+          map.set(d.transferId, { certId: d.certId, from: d.from, to: d.to, share: d.share, type: d.type, state: "pending" });
         } else if (e.action === "转移确认" || e.action === "继承过户完成") {
           const t = map.get(d.transferId);
           if (t) t.state = "confirmed";
@@ -876,13 +876,20 @@
         if (c.status !== "revoked" && c.holders.reduce((a, h) => a + (Number(h.share) || 0), 0) !== 100)
           throw new Error("证书 " + c.certId + " 的产权份额合计异常");
       }
-      for (const t of st.transfers)
+      const seenTransferIds = new Set();
+      for (const t of st.transfers) {
+        if (!t || !t.id || seenTransferIds.has(t.id)) throw new Error("转移单编号缺失或重复绑定");
+        seenTransferIds.add(t.id);
+        if (!t.certId) throw new Error("转移单 " + t.id + " 缺失证书绑定");
         if (!st.certs.some(c => c.certId === t.certId))
-          throw new Error("转移单引用了不存在的证书 " + t.certId);
+          throw new Error("转移单 " + t.id + " 引用了不存在的证书 " + t.certId);
+      }
       const replayed = replayTransfers(st);
       for (const t of st.transfers) {
         const r = replayed.get(t.id);
         if (!r) throw new Error("转移单 " + t.id + " 在台账中缺少发起记录");
+        if (r.certId !== t.certId)
+          throw new Error("转移单 " + t.id + " 的证书绑定与台账不符（台账记载为 " + r.certId + "）");
         if (r.from !== t.from || r.to !== t.to || r.share !== t.share || r.type !== t.type)
           throw new Error("转移单 " + t.id + " 的来源、受让方、份额或类型与台账不符");
         if (r.state !== t.state)

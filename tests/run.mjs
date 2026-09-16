@@ -535,6 +535,74 @@ try {
   assert(await page7.evaluate(() => window.ZFL.verifyAll().badCerts.length === 0), "刷新后全部证书校验为真");
   await ctx6.close();
 
+  /* ---------- S14 转移单改挂证书：绑定一致性 ---------- */
+  scenario = "S14-转移单改挂证书";
+  const ctx7 = await browser.newContext();
+  const page8 = await ctx7.newPage();
+  await page8.goto(base, { waitUntil: "load" });
+  await page8.evaluate(() => window.ZFL.setOperator("工坊主"));
+  const widA8 = await page8.evaluate(() => window.ZFL.state.works.find(w => w.status === "待交付").id);
+  const issA8 = await page8.evaluate(id => window.ZFL.txIssue(id, [{ name: "张三", share: 100 }]), widA8);
+  const certA8 = issA8.result.certId;
+  await page8.locator("#workForm input[name=base]").fill("木胎插屏");
+  await page8.locator("#workForm input[name=theme]").fill("松鹤延年");
+  await page8.locator("#workForm select[name=status]").selectOption("待交付");
+  await page8.locator("#workForm button[type=submit]").click();
+  await toastText(page8, /作品已加入工坊/);
+  const widB8 = await page8.evaluate(() => window.ZFL.state.works.find(w => w.theme === "松鹤延年").id);
+  const issB8 = await page8.evaluate(id => window.ZFL.txIssue(id, [{ name: "张三", share: 100 }]), widB8);
+  const certB8 = issB8.result.certId;
+  assert(certA8 !== certB8, "准备：两张同名持有人（张三）的证书");
+  await page8.evaluate(() => window.ZFL.setOperator("张三"));
+  const tA8 = (await page8.evaluate(c => window.ZFL.txInitiate(c, "张三", "李四", 40, "普通转让", ""), certA8)).result.id;
+  const [dl8] = await Promise.all([page8.waitForEvent("download"), page8.click("#exportBtn")]);
+  const valid8Path = await dl8.path();
+  const valid8 = JSON.parse(await readFile(valid8Path, "utf8"));
+  const clone8 = () => JSON.parse(JSON.stringify(valid8));
+  const stateStr8 = () => page8.evaluate(() => localStorage.getItem("zfl42State"));
+  async function badImport8(obj, re, label) {
+    const p = `/tmp/zfl-bad14-${label}.json`;
+    await writeFile(p, JSON.stringify(obj));
+    const before = await stateStr8();
+    await page8.setInputFiles("#importFile", p);
+    const t = await toastText(page8, re);
+    assert(re.test(t), `${label}被拒绝：${t}`);
+    assert(await stateStr8() === before, `${label}后作品、证书、转移单与台账保持原样`);
+  }
+  const rebind = clone8();
+  rebind.state.transfers.find(t => t.id === tA8).certId = certB8;
+  await badImport8(rebind, /导入失败：转移单 .* 的证书绑定与台账不符/, "改挂到同名持有人证书");
+  const rebindGhost = clone8();
+  rebindGhost.state.transfers.find(t => t.id === tA8).certId = "ZFL-2099-9999";
+  await badImport8(rebindGhost, /导入失败：转移单 .* 引用了不存在的证书/, "改挂到不存在证书");
+  const noBind = clone8();
+  delete noBind.state.transfers.find(t => t.id === tA8).certId;
+  await badImport8(noBind, /导入失败：转移单 .* 缺失证书绑定/, "缺失证书绑定");
+  const dupBind = clone8();
+  dupBind.state.transfers.push({ ...dupBind.state.transfers.find(t => t.id === tA8), certId: certB8 });
+  await badImport8(dupBind, /导入失败：转移单编号缺失或重复绑定/, "重复绑定转移单");
+  // 正常恢复
+  await page8.setInputFiles("#importFile", valid8Path);
+  txt = await toastText(page8, /导入完成：作品 \d+ · 证书 \d+，台账链完整/);
+  assert(/导入完成/.test(txt), `正常恢复成功：${txt}`);
+  let st8 = await page8.evaluate(() => JSON.parse(JSON.stringify(window.ZFL.state)));
+  const tA8after = st8.transfers.find(t => t.id === tA8);
+  assert(tA8after.state === "pending" && tA8after.certId === certA8, "恢复后原证书的待确认关系不变");
+  assert(holdersOf(st8, certB8) === "张三:100", "其他证书持有人未受影响");
+  await page8.evaluate(() => window.ZFL.setOperator("李四"));
+  assert((await page8.evaluate(t => window.ZFL.txConfirm(t), tA8)).ok, "恢复后待确认转移单确认成功");
+  st8 = await page8.evaluate(() => JSON.parse(JSON.stringify(window.ZFL.state)));
+  assert(holdersOf(st8, certA8) === "张三:60,李四:40", "确认后证书 A 份额正确（张三60/李四40）");
+  assert(holdersOf(st8, certB8) === "张三:100", "确认后证书 B 未被误改");
+  await page8.evaluate(() => window.ZFL.setOperator("张三"));
+  const tC8 = (await page8.evaluate(c => window.ZFL.txInitiate(c, "张三", "王五", 10, "普通转让", ""), certA8)).result.id;
+  assert((await page8.evaluate(t => window.ZFL.txCancelTransfer(t), tC8)).ok, "恢复后发起与取消转移单仍按原流程工作");
+  await page8.reload({ waitUntil: "load" });
+  st8 = await page8.evaluate(() => JSON.parse(JSON.stringify(window.ZFL.state)));
+  assert(holdersOf(st8, certA8) === "张三:60,李四:40" && holdersOf(st8, certB8) === "张三:100", "刷新后两张证书产权保持一致");
+  assert(await page8.evaluate(() => window.ZFL.verifyAll().badCerts.length === 0), "刷新后全部证书校验为真");
+  await ctx7.close();
+
   assert(pageErrors.length === 0, `全程无页面脚本错误${pageErrors.length ? "：" + pageErrors[0] : ""}`);
   console.log(`\n全部场景通过，共 ${passed} 项断言。`);
 } catch (e) {
